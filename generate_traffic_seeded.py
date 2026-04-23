@@ -26,9 +26,9 @@ def main():
     cfg = SimulationConfig()
     cfg.host = args.host
     cfg.port = args.port
-    cfg.master_seed = args.seed
-    cfg.traffic_seed = args.traffic_seed
-    cfg.walker_seed = args.walker_seed
+    if args.seed is not None: cfg.master_seed = args.seed
+    if args.traffic_seed is not None: cfg.traffic_seed = args.traffic_seed
+    if args.walker_seed is not None: cfg.walker_seed = args.walker_seed
     cfg.traffic.number_of_vehicles = args.vehicles
     cfg.traffic.number_of_walkers = args.walkers
     cfg.traffic.asynch = args.asynch

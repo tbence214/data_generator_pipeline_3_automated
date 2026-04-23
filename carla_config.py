@@ -69,10 +69,10 @@ class SimulationConfig:
     ego_camera_x: float = 1.5
     ego_camera_y: float = 0.0
     ego_camera_z: float = 1.2
-    master_seed: Optional[int] = None
-    traffic_seed: Optional[int] = None
-    ego_seed: Optional[int] = None
-    walker_seed: Optional[int] = None
+    master_seed: Optional[int] = 40
+    traffic_seed: Optional[int] = 40
+    ego_seed: Optional[int] = 40
+    walker_seed: Optional[int] = 40
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)

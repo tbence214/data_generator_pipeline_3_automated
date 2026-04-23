@@ -122,6 +122,13 @@ def is_bbox_visible(actor, bbox, depth_map, w2c, cfg):
     return (visible / total) >= cfg.capture.min_visible_ratio
 
 
+def smooth_bbox(previous_bbox, current_bbox, alpha=0.7):
+    prev = np.array(previous_bbox, dtype=np.float32)
+    curr = np.array(current_bbox, dtype=np.float32)
+    smoothed = alpha * curr + (1.0 - alpha) * prev
+    return tuple(int(round(v)) for v in smoothed)
+
+
 def spawn_ego(world, cfg, ego_seed=None):
     seeds = resolve_seeds(cfg)
     if ego_seed is None:
@@ -155,6 +162,10 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
     rgb_camera = None
     depth_camera = None
     created_ego = False
+    bbox_history = {}
+    bbox_missing_counts = {}
+    bbox_smoothing_alpha = 0.7
+    bbox_hold_frames = 1
 
     try:
         if ego_vehicle is None:
@@ -217,12 +228,23 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 if coco_class == -1:
                     continue
 
-                bbox = get_actor_bbox_2d(actor, K, w2c, cfg)
-                if bbox is None:
-                    continue
+                raw_bbox = get_actor_bbox_2d(actor, K, w2c, cfg)
 
-                if not is_bbox_visible(actor, bbox, depth_map, w2c, cfg):
-                    continue
+                if raw_bbox is None or not is_bbox_visible(actor, raw_bbox, depth_map, w2c, cfg):
+                    if actor.id in bbox_history and bbox_missing_counts.get(actor.id, 0) < bbox_hold_frames:
+                        bbox = bbox_history[actor.id]
+                        bbox_missing_counts[actor.id] = bbox_missing_counts.get(actor.id, 0) + 1
+                    else:
+                        bbox_history.pop(actor.id, None)
+                        bbox_missing_counts.pop(actor.id, None)
+                        continue
+                else:
+                    if actor.id in bbox_history:
+                        bbox = smooth_bbox(bbox_history[actor.id], raw_bbox, bbox_smoothing_alpha)
+                    else:
+                        bbox = raw_bbox
+                    bbox_history[actor.id] = bbox
+                    bbox_missing_counts[actor.id] = 0
 
                 xmin, ymin, xmax, ymax = bbox
                 center_x = (xmin + xmax) / 2.0 / cfg.capture.img_width
@@ -280,8 +302,8 @@ def main():
     cfg.capture.img_height = args.height
     cfg.capture.fov = args.fov
     cfg.capture.draw_labels = args.draw_labels
-    cfg.master_seed = args.seed
-    cfg.ego_seed = args.ego_seed
+    if args.seed is not None: cfg.master_seed = args.seed
+    if args.ego_seed is not None: cfg.ego_seed = args.ego_seed
 
     client = carla.Client(cfg.host, cfg.port)
     client.set_timeout(10.0)

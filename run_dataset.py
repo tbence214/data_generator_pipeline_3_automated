@@ -34,10 +34,10 @@ def main():
     cfg = SimulationConfig()
     cfg.host = args.host
     cfg.port = args.port
-    cfg.master_seed = args.seed
-    cfg.traffic_seed = args.traffic_seed
-    cfg.ego_seed = args.ego_seed
-    cfg.walker_seed = args.walker_seed
+    if args.seed is not None: cfg.master_seed = args.seed
+    if args.traffic_seed is not None: cfg.traffic_seed = args.traffic_seed
+    if args.ego_seed is not None: cfg.ego_seed = args.ego_seed
+    if args.walker_seed is not None: cfg.walker_seed = args.walker_seed
     if args.frames is not None:
         cfg.capture.max_frames = args.frames
     cfg.capture.img_width = args.width
