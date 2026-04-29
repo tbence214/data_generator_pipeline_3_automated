@@ -4,20 +4,20 @@ from typing import Optional
 
 @dataclass
 class WeatherConfig:
-    cloudiness: float = 80.0 # 0 = clear sky, 100 = fully overcast
+    cloudiness: float = 0.0 # 0 = clear sky, 100 = fully overcast
     precipitation: float = 0.0 # Rain intensity. 0 = none, 100 = heavy rain.
-    precipitation_deposits: float = 90.0 # Puddles on the road. 0 = none, 100 = road covered with water.
-    wind_intensity: float = 70.0 # Wind strength. It mainly matters for the look of rain and tree motion.
+    precipitation_deposits: float = 0.0 # Puddles on the road. 0 = none, 100 = road covered with water.
+    wind_intensity: float = 20.0 # Wind strength. It mainly matters for the look of rain and tree motion.
     sun_azimuth_angle: float = 0.0 # Turns the sun around the horizon. It changes the direction of sunlight and shadows.
-    sun_altitude_angle: float = 50.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
-    fog_density: float = 15.0
+    sun_altitude_angle: float = 70.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
+    fog_density: float = 0.0
     fog_distance: float = 0.0
     fog_falloff: float = 0.0
     wetness: float = 0.0 # Road wetness.
     scattering_intensity: float = 1.0 # How much light contributes to volumetric fog. Higher values make fog feel more present.
     mie_scattering_scale: float = 0.03 # Creates haze and halos around light sources. Higher values make the sky and air look more polluted or hazy.
     rayleigh_scattering_scale: float = 0.0331 # Controls the blue-sky / red-sunset atmosphere. Higher or lower values can shift the feel of daylight quite a bit. CARLA’s default constructor value is 0.0331.
-    dust_storm: float = 95.0 # Dust storm strength, from 0 to 100.
+    dust_storm: float = 0.0 # Dust storm strength, from 0 to 100.
 
 
 @dataclass
