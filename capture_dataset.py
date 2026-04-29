@@ -165,7 +165,7 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
     bbox_history = {}
     bbox_missing_counts = {}
     bbox_smoothing_alpha = 0.7
-    bbox_hold_frames = 1
+    bbox_hold_frames = 4
 
     try:
         if ego_vehicle is None:

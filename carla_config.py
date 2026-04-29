@@ -46,8 +46,8 @@ class CaptureConfig:
     fov: float = 90.0
     min_box_area: int = 150
     depth_tolerance_meters: float = 2.5
-    min_visible_ratio: float = 0.35
-    visible_sample_grid: int = 5
+    min_visible_ratio: float = 0.25
+    visible_sample_grid: int = 15
     draw_labels: bool = False
     output_dir: str = "output"
     labels_dir: str = "output/labels"
@@ -69,10 +69,10 @@ class SimulationConfig:
     ego_camera_x: float = 1.5
     ego_camera_y: float = 0.0
     ego_camera_z: float = 1.2
-    master_seed: Optional[int] = 40
-    traffic_seed: Optional[int] = 40
-    ego_seed: Optional[int] = 40
-    walker_seed: Optional[int] = 40
+    master_seed: Optional[int] = None
+    traffic_seed: Optional[int] = None
+    ego_seed: Optional[int] = None
+    walker_seed: Optional[int] = None
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
