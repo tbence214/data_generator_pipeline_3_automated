@@ -1,0 +1,275 @@
+Here’s a **clean, practical help text** you can drop into your project (README or `--help` output). No fluff, just what actually matters when running your pipeline.
+
+---
+
+# 🚗 CARLA Dataset Pipeline – CLI Help
+
+## 🔹 Basic Usage
+
+Run traffic (Terminal 1):
+
+```bash
+python generate_traffic.py [OPTIONS]
+```
+
+Run data capture (Terminal 2):
+
+```bash
+python run_dataset.py [OPTIONS]
+```
+
+---
+
+# ⚙️ DATASET SCRIPT (run_dataset.py)
+
+## Core Flags
+
+### `--frames`
+
+Number of frames to capture
+(default comes from config)
+
+```bash
+--frames 1000
+```
+
+---
+
+### `--seed`
+
+Global seed for reproducibility
+
+* Same seed → same ego behavior (if controlled)
+* Combine with traffic seed for full determinism
+
+```bash
+--seed 42
+```
+
+---
+
+### `--output`
+
+Output directory
+
+```bash
+--output dataset_run_01
+```
+
+---
+
+## What it does
+
+* Spawns ego vehicle
+* Attaches RGB + depth cameras
+* Generates:
+
+  * images
+  * bounding boxes
+  * YOLO labels
+* Filters:
+
+  * occlusion (depth-based)
+  * small boxes
+* Runs in **synchronous mode**
+
+---
+
+# 🚦 TRAFFIC SCRIPT (generate_traffic.py)
+
+## Core Flags
+
+### `--number-of-vehicles`
+
+How many cars to spawn
+
+```bash
+-n 50
+```
+
+---
+
+### `--number-of-walkers`
+
+How many pedestrians
+
+```bash
+-w 20
+```
+
+---
+
+### `--seed`
+
+Controls **vehicle randomness + traffic manager**
+
+👉 Same seed = same traffic layout
+
+```bash
+--seed 42
+```
+
+---
+
+### `--seedw`
+
+Pedestrian randomness
+
+```bash
+--seedw 123
+```
+
+---
+
+### `--asynch`
+
+Run in async mode
+
+⚠️ Not recommended for dataset generation
+Use sync for stability
+
+---
+
+### `--hybrid`
+
+Hybrid physics (better performance for large maps)
+
+---
+
+### `--safe`
+
+Avoid unstable vehicles (less crashes)
+
+---
+
+### `--car-lights-on`
+
+Enable automatic headlights
+
+---
+
+### `--hero`
+
+Marks one vehicle as ego candidate
+
+(not needed in your current setup)
+
+---
+
+### `--respawn`
+
+Respawn vehicles dynamically (large maps only)
+
+---
+
+### `--no-rendering`
+
+Disable rendering → big performance boost
+
+⚠️ Only use if you don’t need visuals
+
+---
+
+## What it does
+
+* Spawns vehicles + pedestrians
+* Enables autopilot via Traffic Manager
+* Handles:
+
+  * movement
+  * avoidance
+  * traffic flow
+* Runs indefinitely until stopped
+
+---
+
+# 🌦️ WEATHER CONTROL (CONFIG)
+
+Currently controlled via config file.
+
+Typical parameters:
+
+```python
+sun_altitude_angle
+cloudiness
+precipitation
+fog_density
+wetness
+```
+
+---
+
+## Example presets
+
+### ☀️ Day
+
+```python
+sun_altitude_angle = 45
+cloudiness = 10
+```
+
+### 🌧️ Rain
+
+```python
+precipitation = 80
+wetness = 70
+```
+
+### 🌙 Night
+
+```python
+sun_altitude_angle = -10
+```
+
+---
+
+# 🎯 RECOMMENDED WORKFLOWS
+
+## 🔁 Reproducible run
+
+```bash
+# Terminal 1
+python generate_traffic.py -n 50 -w 20 --seed 42
+
+# Terminal 2
+python run_dataset.py --frames 1000 --seed 42
+```
+
+---
+
+## 🎲 Randomized dataset
+
+```bash
+python generate_traffic.py -n 50 -w 20
+python run_dataset.py --frames 1000
+```
+
+---
+
+## ⚡ Fast generation
+
+```bash
+python generate_traffic.py --no-rendering -n 100
+```
+
+---
+
+# 🧠 Key Takeaways
+
+* **Config = default behavior**
+* **CLI = per-run control**
+* **Seeds = reproducibility**
+* **Sync mode = stable data**
+* **Async = faster but risky**
+
+---
+
+If you want next step:
+I can upgrade this so you get:
+
+* `--weather preset` (rain/night/random)
+* `--randomize-weather per frame`
+* unified launcher (one command instead of 2 terminals)
+
+That’s where this becomes a *real* dataset pipeline.
+

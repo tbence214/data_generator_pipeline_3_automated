@@ -1,0 +1,28 @@
+# ----------------------------------------------------------------------
+# CARLA Dataset Generation Pipeline - Git Ignore Configuration
+# ----------------------------------------------------------------------
+
+# 1. Ignore all generated dataset output directories
+dataset_*/
+dataset_default/
+output/
+
+# 2. Ignore specific image and label extensions anywhere in the project
+*.jpg
+*.png
+*.jpeg
+*.txt
+
+# 3. Ignore Python cache and compiled files (Standard Python practice)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 4. Ignore virtual environments (if you are using one)
+venv/
+env/
+.venv/
+
+# 5. Ignore OS-specific hidden files (Optional but recommended)
+.DS_Store
+Thumbs.db
