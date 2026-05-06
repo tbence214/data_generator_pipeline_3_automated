@@ -54,6 +54,8 @@ class CaptureConfig:
     rgb_dir: str = "output/pictures"
     bbox_dir: str = "output/b_picture"
 
+    max_render_distance: float = 100.0
+
 
 @dataclass
 class SimulationConfig:

@@ -39,7 +39,36 @@ def decode_depth_image(depth_image):
     return 1000.0 * normalized
 
 
-def get_actor_bbox_2d(actor, K, w2c, cfg):
+import numpy as np
+
+def get_actor_bbox_2d_optimized(actor, ego_vehicle, K, w2c, cfg):
+    """
+    Calculates the 2D bounding box of an actor, optimized with early frustum culling.
+    
+    Args:
+        actor: The target CARLA actor (e.g., a vehicle or pedestrian).
+        ego_vehicle: The vehicle the camera is attached to.
+        K: Camera intrinsic projection matrix.
+        w2c: World-to-camera transformation matrix.
+        cfg: Configuration object.
+    """
+    # 1. EARLY DISTANCE CULLING (From Docs)
+    # Ignore actors that are too far away to matter, saving CPU cycles.
+    dist = actor.get_transform().location.distance(ego_vehicle.get_transform().location)
+    if dist > cfg.capture.max_render_distance:
+        return None
+
+    # 2. EARLY FRUSTUM CULLING (From Docs)
+    # Use the dot product to check if the actor is behind the ego vehicle.
+    # This prevents calculating matrix projections for objects we can't see.
+    forward_vec = ego_vehicle.get_transform().get_forward_vector()
+    ray = actor.get_transform().location - ego_vehicle.get_transform().location
+    
+    # If the dot product is less than 0, the object is behind us.
+    if forward_vec.dot(ray) <= 0:
+        return None
+
+    # 3. VERTEX EXTRACTION (From your original code)
     bb = actor.bounding_box
     world_vertices = bb.get_world_vertices(actor.get_transform())
 
@@ -48,25 +77,32 @@ def get_actor_bbox_2d(actor, K, w2c, cfg):
         p = np.array([vertex.x, vertex.y, vertex.z, 1.0])
         p_camera = np.dot(w2c, p)
 
+        # Extra safety check to ensure points are strictly in front of the camera plane
         if p_camera[0] <= 0.01:
             continue
 
+        # 4. 3D TO 2D PROJECTION
         p_img = np.dot(K, np.array([p_camera[1], -p_camera[2], p_camera[0]]))
         u = p_img[0] / p_img[2]
         v_ = p_img[1] / p_img[2]
         pts.append((u, v_))
 
+    # If all points were behind the camera plane, return None
     if not pts:
         return None
 
+    # 5. BOUNDARY CLAMPING (From your original code)
+    # Clamping prevents the coordinates from exceeding the actual image dimensions
     xmin = max(0, int(min(p[0] for p in pts)))
     xmax = min(cfg.capture.img_width - 1, int(max(p[0] for p in pts)))
     ymin = max(0, int(min(p[1] for p in pts)))
     ymax = min(cfg.capture.img_height - 1, int(max(p[1] for p in pts)))
 
+    # Ignore invalid boxes (e.g., negative width/height)
     if xmax <= xmin or ymax <= ymin:
         return None
 
+    # 6. AREA FILTERING (From your original code)
     area = (xmax - xmin) * (ymax - ymin)
     if area < cfg.capture.min_box_area:
         return None
@@ -228,7 +264,7 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 if coco_class == -1:
                     continue
 
-                raw_bbox = get_actor_bbox_2d(actor, K, w2c, cfg)
+                raw_bbox = get_actor_bbox_2d_optimized(actor, ego_vehicle, K, w2c, cfg)
 
                 if raw_bbox is None or not is_bbox_visible(actor, raw_bbox, depth_map, w2c, cfg):
                     if actor.id in bbox_history and bbox_missing_counts.get(actor.id, 0) < bbox_hold_frames:
