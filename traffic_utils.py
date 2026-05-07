@@ -261,16 +261,17 @@ def cleanup_traffic(client, world, state):
 # REPLACE
 def replace_static_parked_cars_with_actors(client, world):
     """
-    Finds static map vehicles, hides them, and spawns real carla.Actor vehicles
-    in their exact locations so they can be detected by bounding box logic.
+    Finds static map vehicles (including bikes), hides them, and spawns real carla.Actor 
+    vehicles in their exact locations so they can be detected by bounding box logic.
     """
     import random
     
     env_vehicle_ids = set()
     static_transforms = []
-    possible_labels = ["Vehicles", "Car", "Truck", "Bus"]
+    
+    # 1. Added "Motorcycle" and "Bicycle" so we hide the fake map bikes too
+    possible_labels = ["Vehicles", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"]
 
-    # 1. Find all baked-in map vehicles and their locations
     for label_name in possible_labels:
         if hasattr(carla.CityObjectLabel, label_name):
             label = getattr(carla.CityObjectLabel, label_name)
@@ -279,15 +280,18 @@ def replace_static_parked_cars_with_actors(client, world):
                 static_transforms.append(obj.transform)
 
     if not static_transforms:
-        print("No static parked cars found on this map to replace.")
+        print("No static parked vehicles found on this map to replace.")
         return []
 
-    # 2. Hide the fake static cars
+    # 2. Hide the fake static cars and bikes
     world.enable_environment_objects(env_vehicle_ids, False)
 
-    # 3. Get safe vehicle blueprints (exclude bikes to prevent them falling over)
+    # 3. Get vehicle blueprints, allowing cars, bikes, and motorcycles.
     blueprints = world.get_blueprint_library().filter("vehicle.*")
-    blueprints = [bp for bp in blueprints if bp.get_attribute('base_type') == 'car']
+    allowed_types = ['car', 'motorcycle', 'bicycle']
+    
+    # Filter to only allow the types listed above
+    blueprints = [bp for bp in blueprints if bp.has_attribute('base_type') and bp.get_attribute('base_type') in allowed_types]
 
     parked_actor_ids = []
     
@@ -296,18 +300,17 @@ def replace_static_parked_cars_with_actors(client, world):
         bp = random.choice(blueprints)
         bp.set_attribute('role_name', 'parked')
         
-        # Give a tiny bump to the Z-axis so they don't clip into the ground and explode
+        # Give a tiny bump to the Z-axis so they don't clip into the ground
         transform.location.z += 0.2  
         
         actor = world.try_spawn_actor(bp, transform)
         if actor is not None:
-            # Turn off physics so it sits perfectly still and saves CPU
+            # Turn off physics so bikes stand perfectly upright and don't fall over
             actor.set_simulate_physics(False) 
             parked_actor_ids.append(actor.id)
 
     print(f"Replaced {len(static_transforms)} map vehicles with {len(parked_actor_ids)} detectable parked actors.")
     
-    # Return the IDs so we can clean them up later
     return parked_actor_ids
 
 
