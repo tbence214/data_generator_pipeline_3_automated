@@ -15,7 +15,7 @@ from carla_utils import build_projection_matrix, ensure_directories, resolve_see
 # Verify by printing np.unique(semantic_map) for a frame if detections fail.
 # ==========================================
 TAG_VEHICLES    = (14,15,16,18,19)  # CityScapes label for vehicles
-TAG_PEDESTRIANS = (12,)    # CityScapes label for walkers/pedestrians
+TAG_PEDESTRIANS = (12,13)    # CityScapes label for walkers/pedestrians
 
 # ==========================================
 # 1. UTILITY FUNCTIONS

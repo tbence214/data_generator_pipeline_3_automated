@@ -87,6 +87,23 @@ def main():
         
         ego_vehicle = spawn_ego(world, cfg, cfg.ego_seed)
         state = spawn_traffic(client, world, cfg, reserved_spawn_points=[ego_vehicle.get_transform()])
+
+        # ==========================================
+        # 3. NEW: DROP AND FREEZE DELAY
+        # Let the simulation run for 5 frames to let the parked cars hit the ground
+        # ==========================================
+        print("Letting parked vehicles drop to the ground...")
+        for _ in range(5):
+            world.tick()
+            
+        # Now that they have landed, freeze them before the bikes tip over!
+        if static_parked_state is not None:
+            parked_actors = world.get_actors(static_parked_state)
+            for actor in parked_actors:
+                if actor is not None and actor.is_alive:
+                    actor.set_simulate_physics(False)
+        # ==========================================
+
         run_capture(world, cfg, ego_vehicle=ego_vehicle)
     finally:
         if state is not None:

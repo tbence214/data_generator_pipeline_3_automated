@@ -306,7 +306,7 @@ def replace_static_parked_cars_with_actors(client, world):
         actor = world.try_spawn_actor(bp, transform)
         if actor is not None:
             # Turn off physics so bikes stand perfectly upright and don't fall over
-            actor.set_simulate_physics(False) 
+            # actor.set_simulate_physics(False) 
             parked_actor_ids.append(actor.id)
 
     print(f"Replaced {len(static_transforms)} map vehicles with {len(parked_actor_ids)} detectable parked actors.")
