@@ -15,7 +15,7 @@ from carla_utils import build_projection_matrix, ensure_directories, resolve_see
 # Verify by printing np.unique(semantic_map) for a frame if detections fail.
 # ==========================================
 TAG_VEHICLES    = (14,15,16,18,19)  # CityScapes label for vehicles
-TAG_PEDESTRIANS = (12)    # CityScapes label for walkers/pedestrians
+TAG_PEDESTRIANS = (12,)    # CityScapes label for walkers/pedestrians
 
 # ==========================================
 # 1. UTILITY FUNCTIONS
@@ -122,7 +122,6 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
 
-    # Safety check: all coordinates must be finite before converting to int
     if not (all(np.isfinite(x) for x in xs) and all(np.isfinite(y) for y in ys)):
         return None
 
@@ -137,29 +136,14 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
     return xmin, ymin, xmax, ymax
 
 # ==========================================
-# 3. INSTANCE-ID → ACTOR MAPPING  (THE KEY FIX)
+# 3. INSTANCE-ID → ACTOR MAPPING  
 # ==========================================
 
 def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic_map, instance_map, cfg):
     """
     Builds a per-frame mapping of {instance_pixel_id: actor} for every visible actor.
-
-    WHY THIS IS NEEDED:
-      CARLA's instance segmentation encodes an internal renderer index in each pixel,
-      not the actor.id you get from the Python API. There is no direct way to convert
-      between them. Instead, for each actor we:
-        1. Project its 3D bounding box to get a coarse 2D search window.
-        2. Mask pixels inside that window to the correct semantic tag.
-        3. Use depth to reject pixels that belong to occluding geometry.
-        4. Take the most frequent surviving pixel value as "the ID for this actor".
-
-    This mapping is then used to look up the exact pixel mask of each actor across
-    the full image for pixel-perfect bounding boxes.
-
-    Depth tolerance is computed from the actor's bounding box extent so that
-    pixels on the far edge of a large vehicle are not mistakenly discarded.
     """
-    mapping = {}  # instance_pixel_id (int) -> carla.Actor
+    mapping = {} 
 
     max_render_distance = getattr(cfg.capture, 'max_render_distance', 100.0)
 
@@ -167,93 +151,90 @@ def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic
         if ego_vehicle is not None and actor.id == ego_vehicle.id:
             continue
 
-        # Distance-based culling
         actor_loc  = actor.get_transform().location
         ego_loc    = ego_vehicle.get_transform().location
         dist_to_actor = actor_loc.distance(ego_loc)
         if dist_to_actor > max_render_distance:
             continue
 
-        # Coarse 2D search window from 3D projection
         rough_bbox = get_rough_3d_bbox(actor, K, w2c, cfg)
         if rough_bbox is None:
             continue
 
         xmin, ymin, xmax, ymax = rough_bbox
-
-        # Select the semantic tag for this actor type
         target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
 
-        # Crop all three maps to the search window
         sem_crop  = semantic_map[ymin:ymax + 1, xmin:xmax + 1]
         inst_crop = instance_map[ymin:ymax + 1, xmin:xmax + 1]
         dep_crop  = depth_map[ymin:ymax + 1, xmin:xmax + 1]
 
-        # Depth tolerance: half the actor's bounding box diagonal + a fixed buffer.
-        # This is generous enough to cover roof/hood pixels that are further from
-        # the actor origin than the center-to-center distance suggests.
         ext = actor.bounding_box.extent
         bb_half_diag = float(np.sqrt(ext.x ** 2 + ext.y ** 2 + ext.z ** 2))
-        tolerance = bb_half_diag + 2.0  # extra 2 m buffer for safety
+        tolerance = bb_half_diag + 2.0 
 
-        # Keep only pixels with the right semantic tag AND plausible depth
         valid_mask = np.isin(sem_crop, target_tags) & (np.abs(dep_crop - dist_to_actor) <= tolerance)
         candidate_ids = inst_crop[valid_mask]
 
         if candidate_ids.size == 0:
-            # Actor is fully occluded or outside the frustum for this frame
             continue
 
-        # The most common pixel value in the valid region is the actor's instance index
         counts = np.bincount(candidate_ids.astype(np.int64))
         dominant_id = int(np.argmax(counts))
 
         if dominant_id <= 0:
             continue
 
-        # Avoid overwriting a mapping if two actors share a dominant_id (edge case)
         if dominant_id not in mapping:
             mapping[dominant_id] = actor
 
-    return mapping  # {pixel_instance_id: actor}
+    return mapping  
 
 # ==========================================
-# 4. PIXEL-PERFECT BOUNDING BOX FROM A KNOWN INSTANCE ID
+# 4. PIXEL-PERFECT BOUNDING BOX 
 # ==========================================
 
 def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg):
     """
-    Given a confirmed instance pixel ID and its semantic tag, searches the full
-    image for all matching pixels and returns a tight axis-aligned bounding box.
-    Returns None if too few pixels are found (actor may have become occluded).
+    Given a confirmed instance pixel ID, calculates a tight axis-aligned bounding box.
+    It includes an occlusion check to discard boxes that are mostly empty space.
     """
     final_mask = (instance_map == inst_id) & np.isin(semantic_map, target_tags)
-    y_coords, x_coords = np.where(final_mask)
-
-    if len(y_coords) == 0:
+    
+    # 1. Count how many actual pixels of this object are visible on screen
+    visible_pixel_count = np.count_nonzero(final_mask)
+    
+    # If fewer than 20 pixels are visible, the object is virtually completely occluded.
+    if visible_pixel_count < 20:
         return None
+
+    y_coords, x_coords = np.where(final_mask)
 
     tight_xmin = int(np.min(x_coords))
     tight_xmax = int(np.max(x_coords))
     tight_ymin = int(np.min(y_coords))
     tight_ymax = int(np.max(y_coords))
 
+    # 2. Calculate the total 2D area of the bounding box
     area = (tight_xmax - tight_xmin + 1) * (tight_ymax - tight_ymin + 1)
+    
     if area < cfg.capture.min_box_area:
+        return None
+
+    # 3. THE OCCLUSION CHECK (Fill Ratio)
+    # Divide the actual visible pixels by the total box area. 
+    # If the box is less than 15% full, it means the object is heavily occluded 
+    # (like behind a fence or trees). We drop it so we don't train on background data.
+    fill_ratio = visible_pixel_count / float(area)
+    
+    if fill_ratio < 0.15:
         return None
 
     return tight_xmin, tight_ymin, tight_xmax, tight_ymax
 
 # ==========================================
-# 5. SMOOTHING AND SPAWNING
+# 5. SPAWNING EGO VEHICLE
 # ==========================================
-
-def smooth_bbox(previous_bbox, current_bbox, alpha=0.6):
-    prev = np.array(previous_bbox, dtype=np.float32)
-    curr = np.array(current_bbox, dtype=np.float32)
-    smoothed = alpha * curr + (1.0 - alpha) * prev
-    return tuple(int(round(v)) for v in smoothed)
-
+# Note: Removed the smooth_bbox function entirely to prevent bounding box lag
 
 def spawn_ego(world, cfg, ego_seed=None):
     seeds = resolve_seeds(cfg)
@@ -285,8 +266,6 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
 
     instance_dir = os.path.join(cfg.capture.output_dir, "instance_seg")
     os.makedirs(instance_dir, exist_ok=True)
-
-    # Debugging helper: save semantic map as grayscale so you can verify tag values
     semantic_dir = os.path.join(cfg.capture.output_dir, "semantic_debug")
     os.makedirs(semantic_dir, exist_ok=True)
 
@@ -295,15 +274,6 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
         ego_seed = seeds["ego_seed"]
 
     spawned_actors = []
-    rgb_camera   = None
-    depth_camera = None
-    inst_camera  = None
-
-    # Per actor-id smoothing state (keyed by carla actor.id, not pixel instance id)
-    bbox_history        = {}  # actor.id -> last known bbox tuple
-    bbox_missing_counts = {}  # actor.id -> consecutive frames without detection
-    bbox_smoothing_alpha = 0.6
-    bbox_hold_frames     = 4
 
     try:
         if ego_vehicle is None:
@@ -314,7 +284,6 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
         blueprint_library = world.get_blueprint_library()
 
         # --- Spawn cameras ---
-
         rgb_bp = blueprint_library.find("sensor.camera.rgb")
         rgb_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
         rgb_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
@@ -354,27 +323,19 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             depth_image = depth_queue.get(timeout=2.0)
             inst_image  = inst_queue.get(timeout=2.0)
 
-            # --- Decode RGB ---
             rgb_array  = np.frombuffer(rgb_image.raw_data, dtype=np.uint8)
             rgb_array  = rgb_array.reshape((cfg.capture.img_height, cfg.capture.img_width, 4))
             bgr_image  = rgb_array[:, :, :3].copy()
             draw_image = bgr_image.copy()
 
-            # --- Decode sensors ---
             depth_map                  = decode_depth_image(depth_image)
             semantic_map, instance_map = decode_instance_image(inst_image)
             w2c                        = np.array(rgb_camera.get_transform().get_inverse_matrix())
 
-            # --- Gather actors ---
             vehicles = list(world.get_actors().filter("*vehicle*"))
             walkers  = list(world.get_actors().filter("*walker*"))
             actors   = vehicles + walkers
 
-            # ----------------------------------------------------------------
-            # CORE FIX: build pixel-instance-id → actor mapping for this frame.
-            # This resolves the mismatch between CARLA's internal renderer index
-            # and the actor.id from the Python API.
-            # ----------------------------------------------------------------
             inst_to_actor = build_instance_to_actor_map(
                 actors, ego_vehicle, K, w2c,
                 depth_map, semantic_map, instance_map, cfg
@@ -383,37 +344,22 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             labels_content = ""
             detected       = 0
 
-            # ----------------------------------------------------------------
-            # Iterate over confirmed (pixel_id, actor) pairs.
-            # Every entry in inst_to_actor has already passed depth + semantic
-            # validation, so we go straight to drawing the pixel-perfect box.
-            # ----------------------------------------------------------------
             for inst_id, actor in inst_to_actor.items():
                 coco_class = get_coco_class(actor.type_id)
                 if coco_class == -1:
                     continue
 
                 target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
-
+                
+                # Fetch exact bound from this current frame mask
                 raw_bbox = get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg)
 
-                # --- Temporal smoothing / hold logic (keyed by actor.id) ---
+                # If the box is dropped (due to occlusion or too few pixels), we skip processing.
+                # Do NOT use a previous frame's box as it creates floating, lagging artifacts.
                 if raw_bbox is None:
-                    if actor.id in bbox_history and bbox_missing_counts.get(actor.id, 0) < bbox_hold_frames:
-                        bbox = bbox_history[actor.id]
-                        bbox_missing_counts[actor.id] = bbox_missing_counts.get(actor.id, 0) + 1
-                    else:
-                        bbox_history.pop(actor.id, None)
-                        bbox_missing_counts.pop(actor.id, None)
-                        continue
-                else:
-                    if actor.id in bbox_history:
-                        bbox = smooth_bbox(bbox_history[actor.id], raw_bbox, bbox_smoothing_alpha)
-                    else:
-                        bbox = raw_bbox
-
-                    bbox_history[actor.id]        = bbox
-                    bbox_missing_counts[actor.id] = 0
+                    continue
+                    
+                bbox = raw_bbox 
 
                 xmin, ymin, xmax, ymax = bbox
 
@@ -442,19 +388,15 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             cv2.imwrite(os.path.join(cfg.capture.rgb_dir,  file_prefix + ".jpg"), bgr_image)
             cv2.imwrite(os.path.join(cfg.capture.bbox_dir, file_prefix + ".jpg"), draw_image)
 
-            # Raw instance segmentation image (for visual debugging)
             inst_raw_array = (
                 np.frombuffer(inst_image.raw_data, dtype=np.uint8)
                   .reshape((cfg.capture.img_height, cfg.capture.img_width, 4))
             )
             cv2.imwrite(os.path.join(instance_dir, file_prefix + ".png"), inst_raw_array[:, :, :3])
 
-            # Semantic map as greyscale (for tag verification during debugging)
-            # Each pixel brightness = semantic tag value. Open in any image viewer
-            # and sample a vehicle pixel — it should read ~10 (very dark grey).
             cv2.imwrite(
                 os.path.join(semantic_dir, file_prefix + ".png"),
-                (semantic_map * 10).astype(np.uint8)   # ×10 so tags are more visible
+                (semantic_map * 10).astype(np.uint8)  
             )
 
             with open(os.path.join(cfg.capture.labels_dir, file_prefix + ".txt"), "w") as f:
@@ -469,7 +411,6 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             except Exception:
                 pass
         print("Done. Cleaned up actors.")
-
 
 # ==========================================
 # 7. ENTRY POINT
