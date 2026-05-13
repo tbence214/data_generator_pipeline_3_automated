@@ -9,7 +9,7 @@ class WeatherConfig:
     precipitation_deposits: float = 0.0 # Puddles on the road. 0 = none, 100 = road covered with water.
     wind_intensity: float = 20.0 # Wind strength. It mainly matters for the look of rain and tree motion.
     sun_azimuth_angle: float = 0.0 # Turns the sun around the horizon. It changes the direction of sunlight and shadows.
-    sun_altitude_angle: float = 70.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
+    sun_altitude_angle: float = 30.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
     fog_density: float = 0.0
     fog_distance: float = 0.0
     fog_falloff: float = 0.0
@@ -40,7 +40,7 @@ class TrafficConfig:
 
 @dataclass
 class CaptureConfig:
-    max_frames: int = 1000
+    max_frames: int = 50
     img_width: int = 1920
     img_height: int = 1080
     fov: float = 90.0
@@ -54,7 +54,7 @@ class CaptureConfig:
     rgb_dir: str = "output/pictures"
     bbox_dir: str = "output/b_picture"
 
-    max_render_distance: float = 100.0
+    max_render_distance: float = 120.0
 
 
 @dataclass
@@ -71,10 +71,10 @@ class SimulationConfig:
     ego_camera_x: float = 1.5
     ego_camera_y: float = 0.0
     ego_camera_z: float = 1.2
-    master_seed: Optional[int] = 35 # 35
-    traffic_seed: Optional[int] = 36 # 36
-    ego_seed: Optional[int] = 37 # 37
-    walker_seed: Optional[int] = 38 # 38
+    master_seed: Optional[int] = None # 35
+    traffic_seed: Optional[int] = None # 36
+    ego_seed: Optional[int] = None # 37
+    walker_seed: Optional[int] = None # 38
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)

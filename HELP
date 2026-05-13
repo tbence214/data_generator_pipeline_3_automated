@@ -1,275 +1,235 @@
-Here’s a **clean, practical help text** you can drop into your project (README or `--help` output). No fluff, just what actually matters when running your pipeline.
+# CARLA Bounding Box Dataset Capture Pipeline
+
+A Python pipeline for automatically generating annotated object detection datasets from the [CARLA](https://carla.org/) autonomous driving simulator (version **0.9.15**). It spawns traffic and pedestrians, drives an ego vehicle through a map, and captures pixel-perfect YOLO-format bounding box labels for vehicles, cyclists, motorcycles, buses, trucks, and pedestrians — across multiple maps in a single automated run.
 
 ---
 
-# 🚗 CARLA Dataset Pipeline – CLI Help
+## Features
 
-## 🔹 Basic Usage
+- **Multi-map batch capture** — queue up any set of CARLA towns and process them sequentially without manual intervention
+- **Pixel-perfect bounding boxes** — uses instance segmentation + depth cameras to compute tight, occlusion-aware bboxes instead of noisy 3D projections
+- **YOLO label format** — outputs `.txt` files with normalised `class cx cy w h` per frame, ready for training
+- **Static parked car replacement** — hides baked-in map vehicles and replaces them with real detectable actors
+- **Reproducible seeding** — full control over traffic, walker, and ego spawn seeds
+- **Configurable weather, traffic density, resolution, FOV** via a single dataclass config
 
-Run traffic (Terminal 1):
+---
+
+## Requirements
+
+| Dependency | Version |
+|---|---|
+| Ubuntu | 22.04 |
+| CARLA Server | 0.9.15 |
+| Python | 3.8+ |
+| carla (Python egg/wheel) | 0.9.15 |
+| numpy | ≥ 1.21 |
+| opencv-python | ≥ 4.5 |
+
+Install Python dependencies:
 
 ```bash
-python generate_traffic.py [OPTIONS]
+pip install numpy opencv-python
 ```
 
-Run data capture (Terminal 2):
+The CARLA Python API is provided by the simulator itself. Add it to your path:
 
 ```bash
-python run_dataset.py [OPTIONS]
+# Adjust path to your CARLA installation
+export PYTHONPATH=$PYTHONPATH:/opt/carla-simulator/PythonAPI/carla/dist/carla-0.9.15-py3.8-linux-x86_64.egg
 ```
 
 ---
 
-# ⚙️ DATASET SCRIPT (run_dataset.py)
+## Project Structure
 
-## Core Flags
+```
+.
+├── batch_generate.py     # Entry point: runs run_dataset.py for multiple maps sequentially
+├── run_dataset.py        # Orchestrates one map: loads world, spawns traffic, runs capture
+├── capture_dataset.py    # Core capture loop: sensors, instance mapping, bbox extraction
+├── traffic_utils.py      # Traffic & walker spawning, parked car replacement, cleanup
+├── carla_utils.py        # CARLA helpers: weather, world settings, projection matrix
+└── carla_config.py       # All configuration dataclasses (SimulationConfig, etc.)
+```
 
-### `--frames`
+---
 
-Number of frames to capture
-(default comes from config)
+## Quick Start
+
+### 1. Start the CARLA Server
 
 ```bash
---frames 1000
+cd /opt/carla-simulator
+./CarlaUE4.sh -quality-level=Epic -world-port=2000
 ```
 
----
-
-### `--seed`
-
-Global seed for reproducibility
-
-* Same seed → same ego behavior (if controlled)
-* Combine with traffic seed for full determinism
+For a headless server (faster, less VRAM):
 
 ```bash
---seed 42
+./CarlaUE4.sh -RenderOffScreen -world-port=2000
 ```
 
----
-
-### `--output`
-
-Output directory
+### 2. Run a Single Map
 
 ```bash
---output dataset_run_01
+python run_dataset.py \
+  --map Town03 \
+  --frames 500 \
+  --vehicles 40 \
+  --walkers 40 \
+  --draw-labels
 ```
 
----
+Output is saved to `dataset_Town03/`.
 
-## What it does
+### 3. Run the Full Batch Pipeline
 
-* Spawns ego vehicle
-* Attaches RGB + depth cameras
-* Generates:
-
-  * images
-  * bounding boxes
-  * YOLO labels
-* Filters:
-
-  * occlusion (depth-based)
-  * small boxes
-* Runs in **synchronous mode**
-
----
-
-# 🚦 TRAFFIC SCRIPT (generate_traffic.py)
-
-## Core Flags
-
-### `--number-of-vehicles`
-
-How many cars to spawn
+Edit `batch_generate.py` to set your maps and parameters, then:
 
 ```bash
--n 50
+python batch_generate.py
 ```
 
+This will process all listed maps in order, saving each to its own folder (`dataset_Town01/`, `dataset_Town02/`, etc.) with a 5-second cooldown between maps to let the CARLA server settle.
+
 ---
 
-### `--number-of-walkers`
+## Output Structure
 
-How many pedestrians
+Each map produces the following directory layout:
 
-```bash
--w 20
+```
+dataset_Town03/
+├── pictures/          # Raw RGB frames as JPEG (00000.jpg, 00001.jpg, ...)
+├── labels/            # YOLO-format annotation files (00000.txt, 00001.txt, ...)
+├── b_picture/         # RGB frames with bounding boxes drawn (for visual verification)
+├── instance_seg/      # Raw instance segmentation images (PNG)
+└── semantic_debug/    # Colour-coded semantic map (PNG, for tag debugging)
 ```
 
----
+Each `.txt` label file contains one detection per line:
 
-### `--seed`
-
-Controls **vehicle randomness + traffic manager**
-
-👉 Same seed = same traffic layout
-
-```bash
---seed 42
+```
+<class_id> <center_x> <center_y> <width> <height>
 ```
 
+All values are normalised to `[0, 1]`.
+
+### COCO-Compatible Class IDs
+
+| ID | Class |
+|---|---|
+| 0 | Pedestrian |
+| 1 | Bicycle |
+| 2 | Car |
+| 3 | Motorcycle |
+| 5 | Bus |
+| 7 | Truck |
+
 ---
 
-### `--seedw`
+## Configuration
 
-Pedestrian randomness
+All settings live in `carla_config.py`. You can override most of them via command-line flags, or edit the dataclasses directly for persistent changes.
 
-```bash
---seedw 123
+### Key `SimulationConfig` fields
+
+| Field | Default | Description |
+|---|---|---|
+| `host` | `127.0.0.1` | CARLA server address |
+| `port` | `2000` | CARLA server port |
+| `map_name` | `None` | Map to load. `None` keeps the current map |
+| `synchronous_mode` | `True` | Must be `True` for reliable frame-sync capture |
+| `fixed_delta_seconds` | `0.05` | Simulation timestep (20 Hz) |
+| `ego_blueprint` | `vehicle.tesla.model3` | Ego vehicle type |
+| `master_seed` | `None` | Master RNG seed. `None` = random each run |
+
+### Key `CaptureConfig` fields
+
+| Field | Default | Description |
+|---|---|---|
+| `max_frames` | `50` | Frames to capture per run |
+| `img_width` / `img_height` | `1920` / `1080` | Camera resolution |
+| `fov` | `90.0` | Camera horizontal field of view (degrees) |
+| `min_box_area` | `150` | Minimum bbox area in pixels to keep a detection |
+| `max_render_distance` | `120.0` | Skip actors beyond this distance (metres) |
+
+### Key `WeatherConfig` fields
+
+| Field | Default | Description |
+|---|---|---|
+| `cloudiness` | `0.0` | 0 = clear sky, 100 = overcast |
+| `sun_altitude_angle` | `30.0` | 90 = midday, negative = below horizon (night) |
+| `precipitation` | `0.0` | Rain intensity, 0–100 |
+| `fog_density` | `0.0` | Fog amount, 0–100 |
+
+---
+
+## CLI Reference
+
+### `run_dataset.py`
+
+```
+--host           CARLA server host (default: 127.0.0.1)
+--port           CARLA server port (default: 2000)
+--map            Map name, e.g. Town01, Town03, Town10HD (default: current map)
+--frames         Number of frames to capture
+--vehicles       Number of traffic vehicles to spawn (default: 30)
+--walkers        Number of pedestrians to spawn (default: 10)
+--seed           Master RNG seed
+--traffic-seed   Seed for traffic spawning
+--ego-seed       Seed for ego vehicle spawn point
+--walker-seed    Seed for pedestrian spawning
+--width          Image width in pixels (default: 1920)
+--height         Image height in pixels (default: 1080)
+--fov            Camera FOV in degrees (default: 90.0)
+--draw-labels    Draw bounding boxes onto b_picture output
+--safe           Only spawn car-type vehicles (no bikes/trucks)
+--hybrid         Enable hybrid physics mode (better performance)
+--car-lights-on  Enable vehicle headlights
 ```
 
----
+### `batch_generate.py`
 
-### `--asynch`
-
-Run in async mode
-
-⚠️ Not recommended for dataset generation
-Use sync for stability
+Edit the `maps_to_run`, `frames_per_map`, `vehicles`, and `walkers` variables at the top of the script, then run it directly. It calls `run_dataset.py` as a subprocess for each map.
 
 ---
 
-### `--hybrid`
+## How It Works
 
-Hybrid physics (better performance for large maps)
-
----
-
-### `--safe`
-
-Avoid unstable vehicles (less crashes)
-
----
-
-### `--car-lights-on`
-
-Enable automatic headlights
+1. **World loading** — `load_world()` hot-swaps the CARLA map via the Python API
+2. **Static car replacement** — baked-in environment vehicles are hidden and replaced with spawned actors so they can be detected by the sensor pipeline
+3. **Traffic & walker spawning** — vehicles get autopilot via the Traffic Manager; walkers get AI controllers
+4. **Ego vehicle** spawns at a random (or seeded) spawn point and drives on autopilot
+5. **Three synchronised cameras** attach to the ego: RGB, Depth, and Instance Segmentation
+6. **Per-frame pipeline** (synchronous tick):
+   - Depth image → metric distance per pixel
+   - Instance segmentation image → semantic tag + 16-bit instance ID per pixel
+   - For each visible actor: project its 3D bbox → find dominant instance pixel ID in the crop → compute pixel-perfect tight bbox → occlusion fill-ratio check → write YOLO label
+7. **Cleanup** — all spawned actors are destroyed and world settings restored
 
 ---
 
-### `--hero`
+## Tips
 
-Marks one vehicle as ego candidate
-
-(not needed in your current setup)
-
----
-
-### `--respawn`
-
-Respawn vehicles dynamically (large maps only)
+- **Verify semantic tags** — if detections look wrong, add `print(np.unique(semantic_map))` inside the capture loop to confirm the tag values match `TAG_VEHICLES` and `TAG_PEDESTRIANS` in `capture_dataset.py`. Tags can vary between CARLA builds.
+- **Increase tolerance for close actors** — the depth tolerance in `build_instance_to_actor_map` is `bb_half_diag + 2.0 m`. If close-range actors are missed, increase the `+ 2.0` offset.
+- **Headless rendering** — launch CARLA with `-RenderOffScreen` to avoid a GPU display window; this significantly speeds up capture.
+- **Frame warm-up** — the pipeline already ticks 5 frames before capture to let physics settle. If spawned vehicles are still jittery on frame 0, increase this count in `run_dataset.py`.
+- **Memory leaks** — on very long runs (1000+ frames) the CARLA server can accumulate memory. The batch pipeline's 5-second cooldown and map reload between runs helps mitigate this.
 
 ---
 
-### `--no-rendering`
+## Known Limitations
 
-Disable rendering → big performance boost
-
-⚠️ Only use if you don’t need visuals
-
----
-
-## What it does
-
-* Spawns vehicles + pedestrians
-* Enables autopilot via Traffic Manager
-* Handles:
-
-  * movement
-  * avoidance
-  * traffic flow
-* Runs indefinitely until stopped
+- Only a forward-facing camera is captured. Actors behind or beside the ego are not labelled.
+- The `fill_ratio < 0.10` occlusion filter can drop partially-visible actors at the edges of the frame.
+- Actors partially outside the image boundary may be missed if their 3D bounding box projects entirely off-screen before the body itself does.
+- `dist_to_actor` is computed from the ego vehicle origin, not the camera position (offset by ~1.9 m). This can affect depth-match accuracy for nearby actors.
 
 ---
 
-# 🌦️ WEATHER CONTROL (CONFIG)
+## License
 
-Currently controlled via config file.
-
-Typical parameters:
-
-```python
-sun_altitude_angle
-cloudiness
-precipitation
-fog_density
-wetness
-```
-
----
-
-## Example presets
-
-### ☀️ Day
-
-```python
-sun_altitude_angle = 45
-cloudiness = 10
-```
-
-### 🌧️ Rain
-
-```python
-precipitation = 80
-wetness = 70
-```
-
-### 🌙 Night
-
-```python
-sun_altitude_angle = -10
-```
-
----
-
-# 🎯 RECOMMENDED WORKFLOWS
-
-## 🔁 Reproducible run
-
-```bash
-# Terminal 1
-python generate_traffic.py -n 50 -w 20 --seed 42
-
-# Terminal 2
-python run_dataset.py --frames 1000 --seed 42
-```
-
----
-
-## 🎲 Randomized dataset
-
-```bash
-python generate_traffic.py -n 50 -w 20
-python run_dataset.py --frames 1000
-```
-
----
-
-## ⚡ Fast generation
-
-```bash
-python generate_traffic.py --no-rendering -n 100
-```
-
----
-
-# 🧠 Key Takeaways
-
-* **Config = default behavior**
-* **CLI = per-run control**
-* **Seeds = reproducibility**
-* **Sync mode = stable data**
-* **Async = faster but risky**
-
----
-
-If you want next step:
-I can upgrade this so you get:
-
-* `--weather preset` (rain/night/random)
-* `--randomize-weather per frame`
-* unified launcher (one command instead of 2 terminals)
-
-That’s where this becomes a *real* dataset pipeline.
-
+This project is provided as-is for research and dataset generation purposes.

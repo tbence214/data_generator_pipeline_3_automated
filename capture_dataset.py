@@ -202,9 +202,9 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
     
     # 1. Count how many actual pixels of this object are visible on screen
     visible_pixel_count = np.count_nonzero(final_mask)
-    
-    # If fewer than 20 pixels are visible, the object is virtually completely occluded.
-    if visible_pixel_count < 20:
+
+    # If fewer than 12 pixels are visible, the object is virtually completely occluded.
+    if visible_pixel_count < 12:
         return None
 
     y_coords, x_coords = np.where(final_mask)
@@ -226,7 +226,7 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
     # (like behind a fence or trees). We drop it so we don't train on background data.
     fill_ratio = visible_pixel_count / float(area)
     
-    if fill_ratio < 0.15:
+    if fill_ratio < 0.10:
         return None
 
     return tight_xmin, tight_ymin, tight_xmax, tight_ymax
