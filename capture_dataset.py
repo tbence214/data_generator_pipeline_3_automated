@@ -218,7 +218,13 @@ def build_instance_to_actor_map(
             continue
 
         xmin, ymin, xmax, ymax = rough_bbox
-        target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
+
+        # Ensure ID discovery sees both vehicle components (bike frame + rider)
+        coco_class = get_coco_class(actor.type_id)
+        if coco_class in (1, 3):
+            target_tags = TAG_VEHICLES + TAG_PEDESTRIANS
+        else:
+            target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
 
         sem_crop  = semantic_map[ymin:ymax + 1, xmin:xmax + 1]
         inst_crop = instance_map[ymin:ymax + 1, xmin:xmax + 1]
@@ -419,38 +425,63 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 if coco_class == -1:
                     continue
 
-                target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
+                is_two_wheeled = coco_class in (1, 3)  # bicycle (1) or motorcycle (3)
 
-                # Fetch exact bound from this current frame mask
-                raw_bbox = get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg)
-
-                # If the box is dropped (due to occlusion or too few pixels), we skip processing.
-                # Do NOT use a previous frame's box as it creates floating, lagging artifacts.
-                if raw_bbox is None:
-                    continue
-
-                bbox = raw_bbox
-
-                xmin, ymin, xmax, ymax = bbox
-
-                center_x = (xmin + xmax) / 2.0 / cfg.capture.img_width
-                center_y = (ymin + ymax) / 2.0 / cfg.capture.img_height
-                width    = (xmax - xmin)        / cfg.capture.img_width
-                height   = (ymax - ymin)        / cfg.capture.img_height
-
-                labels_content += "{} {:.6f} {:.6f} {:.6f} {:.6f}\n".format(
-                    coco_class, center_x, center_y, width, height
-                )
-
-                cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                if cfg.capture.draw_labels:
-                    cv2.putText(
-                        draw_image, str(coco_class),
-                        (xmin, max(0, ymin - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
+                if is_two_wheeled:
+                    # --- Vehicle box (the bike frame itself) ---
+                    vehicle_bbox = get_pixel_perfect_bbox(
+                        inst_id, TAG_VEHICLES, semantic_map, instance_map, cfg
                     )
+                    if vehicle_bbox is not None:
+                        xmin, ymin, xmax, ymax = vehicle_bbox
+                        cx = (xmin + xmax) / 2.0 / cfg.capture.img_width
+                        cy = (ymin + ymax) / 2.0 / cfg.capture.img_height
+                        w  = (xmax - xmin)        / cfg.capture.img_width
+                        h  = (ymax - ymin)        / cfg.capture.img_height
+                        labels_content += f"{coco_class} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
+                        cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+                        
+                        if cfg.capture.draw_labels:
+                            cv2.putText(draw_image, str(coco_class), (xmin, max(0, ymin - 5)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        detected += 1
 
-                detected += 1
+                    # --- Rider box (the person on the bike, class 0 = pedestrian) ---
+                    rider_bbox = get_pixel_perfect_bbox(
+                        inst_id, TAG_PEDESTRIANS, semantic_map, instance_map, cfg
+                    )
+                    if rider_bbox is not None:
+                        xmin, ymin, xmax, ymax = rider_bbox
+                        cx = (xmin + xmax) / 2.0 / cfg.capture.img_width
+                        cy = (ymin + ymax) / 2.0 / cfg.capture.img_height
+                        w  = (xmax - xmin)        / cfg.capture.img_width
+                        h  = (ymax - ymin)        / cfg.capture.img_height
+                        labels_content += f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
+                        cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+                        
+                        if cfg.capture.draw_labels:
+                            cv2.putText(draw_image, "0", (xmin, max(0, ymin - 5)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        detected += 1
+
+                else:
+                    # --- Normal single-box path for cars, buses, trucks, pedestrians ---
+                    target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
+                    bbox = get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg)
+                    if bbox is None:
+                        continue
+                    xmin, ymin, xmax, ymax = bbox
+                    cx = (xmin + xmax) / 2.0 / cfg.capture.img_width
+                    cy = (ymin + ymax) / 2.0 / cfg.capture.img_height
+                    w  = (xmax - xmin)        / cfg.capture.img_width
+                    h  = (ymax - ymin)        / cfg.capture.img_height
+                    labels_content += f"{coco_class} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
+                    cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+                    
+                    if cfg.capture.draw_labels:
+                        cv2.putText(draw_image, str(coco_class), (xmin, max(0, ymin - 5)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    detected += 1
 
             # --- Save outputs ---
             file_prefix = "{:05d}".format(frame)
