@@ -17,6 +17,11 @@ from carla_utils import build_projection_matrix, ensure_directories, resolve_see
 TAG_VEHICLES    = (14,15,16,18,19)  # CityScapes label for vehicles
 TAG_PEDESTRIANS = (12,13)    # CityScapes label for walkers/pedestrians
 
+# Padding (pixels) added to every side of the rough 3D bbox crop window.
+# This ensures partially off-screen actors still get a wide enough search
+# region for reliable instance-ID voting. See Bug 2 fix in get_rough_3d_bbox.
+_CROP_PAD = 20
+
 # ==========================================
 # 1. UTILITY FUNCTIONS
 # ==========================================
@@ -104,8 +109,19 @@ def _project_world_point(point_xyz, K, w2c):
 def get_rough_3d_bbox(actor, K, w2c, cfg):
     """
     Projects the actor's 3D bounding box onto the image plane and returns
-    a 2D pixel rectangle (xmin, ymin, xmax, ymax) as a coarse search window.
-    Returns None if the actor is behind the camera or outside the image.
+    a 2D pixel rectangle (xmin, ymin, xmax, ymax) as a padded search window.
+
+    FIX Bug 2: A _CROP_PAD pixel margin is added on every side AFTER clamping
+    so that partially off-screen actors (where most bbox vertices project outside
+    the image) still produce a wide-enough crop for reliable instance-ID voting.
+
+    FIX Bug 3: If ALL 8 bbox vertices are behind the camera (pts is empty), the
+    function no longer immediately returns None. Instead it falls back to
+    projecting the actor's bounding-box centre. This handles actors that are very
+    close to the camera and whose body is visible even though the box corners are
+    all behind the near clip plane. Only returns None when the centre is also
+    behind the camera, or when the final search window lies entirely outside the
+    image.
     """
     bb = actor.bounding_box
     world_vertices = bb.get_world_vertices(actor.get_transform())
@@ -116,8 +132,20 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
         if p is not None:
             pts.append(p)
 
+    # ------------------------------------------------------------------
+    # FIX Bug 3: all 8 vertices behind the camera — try bbox centre instead
+    # ------------------------------------------------------------------
     if not pts:
-        return None
+        bb_center_world = actor.get_transform().transform(actor.bounding_box.location)
+        p = _project_world_point(
+            (bb_center_world.x, bb_center_world.y, bb_center_world.z), K, w2c
+        )
+        if p is None:
+            # Centre is also behind camera; actor is genuinely not visible.
+            return None
+        # Use the projected centre as a single representative point.
+        # The _CROP_PAD expansion below will create a meaningful search window.
+        pts = [p]
 
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
@@ -125,10 +153,26 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
     if not (all(np.isfinite(x) for x in xs) and all(np.isfinite(y) for y in ys)):
         return None
 
-    xmin = max(0, int(np.floor(min(xs))))
-    xmax = min(cfg.capture.img_width - 1, int(np.ceil(max(xs))))
-    ymin = max(0, int(np.floor(min(ys))))
-    ymax = min(cfg.capture.img_height - 1, int(np.ceil(max(ys))))
+    raw_xmin = int(np.floor(min(xs)))
+    raw_xmax = int(np.ceil(max(xs)))
+    raw_ymin = int(np.floor(min(ys)))
+    raw_ymax = int(np.ceil(max(ys)))
+
+    # Visibility check on the UNCLAMPED rect: if the entire projection falls
+    # outside the image boundary on any single axis, skip the actor.
+    if raw_xmax < 0 or raw_xmin >= cfg.capture.img_width:
+        return None
+    if raw_ymax < 0 or raw_ymin >= cfg.capture.img_height:
+        return None
+
+    # ------------------------------------------------------------------
+    # FIX Bug 2: apply _CROP_PAD before clamping to image bounds so that
+    # actors sitting at the edge of the frame get a wide enough search region.
+    # ------------------------------------------------------------------
+    xmin = max(0,                       raw_xmin - _CROP_PAD)
+    xmax = min(cfg.capture.img_width  - 1, raw_xmax + _CROP_PAD)
+    ymin = max(0,                       raw_ymin - _CROP_PAD)
+    ymax = min(cfg.capture.img_height - 1, raw_ymax + _CROP_PAD)
 
     if xmax <= xmin or ymax <= ymin:
         return None
@@ -136,14 +180,24 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
     return xmin, ymin, xmax, ymax
 
 # ==========================================
-# 3. INSTANCE-ID → ACTOR MAPPING  
+# 3. INSTANCE-ID → ACTOR MAPPING
 # ==========================================
 
-def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic_map, instance_map, cfg):
+def build_instance_to_actor_map(
+    actors, ego_vehicle, cam_loc, K, w2c,
+    depth_map, semantic_map, instance_map, cfg
+):
     """
     Builds a per-frame mapping of {instance_pixel_id: actor} for every visible actor.
+
+    FIX Bug 1: accepts cam_loc (the world-space camera location) and uses it
+    instead of the ego vehicle's origin to compute dist_to_actor.  The depth
+    map encodes distance from the CAMERA lens, not from the vehicle pivot, so
+    the depth-validity check was biased by up to ~1.9 m for a typical
+    front-mounted camera.  This is most noticeable for actors that are close
+    to the vehicle and near the edges of the frame.
     """
-    mapping = {} 
+    mapping = {}
 
     max_render_distance = getattr(cfg.capture, 'max_render_distance', 100.0)
 
@@ -151,9 +205,11 @@ def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic
         if ego_vehicle is not None and actor.id == ego_vehicle.id:
             continue
 
-        actor_loc  = actor.get_transform().location
-        ego_loc    = ego_vehicle.get_transform().location
-        dist_to_actor = actor_loc.distance(ego_loc)
+        actor_loc = actor.get_transform().location
+
+        # FIX Bug 1: measure from the camera, not the ego vehicle origin.
+        dist_to_actor = actor_loc.distance(cam_loc)
+
         if dist_to_actor > max_render_distance:
             continue
 
@@ -170,8 +226,11 @@ def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic
 
         ext = actor.bounding_box.extent
         bb_half_diag = float(np.sqrt(ext.x ** 2 + ext.y ** 2 + ext.z ** 2))
-        tolerance = bb_half_diag + 2.0 
+        tolerance = bb_half_diag + 2.0
 
+        # FIX Bug 1 (continued): depth map values are measured from the camera,
+        # so comparing them against dist_to_actor (also from the camera) is now
+        # consistent.
         valid_mask = np.isin(sem_crop, target_tags) & (np.abs(dep_crop - dist_to_actor) <= tolerance)
         candidate_ids = inst_crop[valid_mask]
 
@@ -187,10 +246,10 @@ def build_instance_to_actor_map(actors, ego_vehicle, K, w2c, depth_map, semantic
         if dominant_id not in mapping:
             mapping[dominant_id] = actor
 
-    return mapping  
+    return mapping
 
 # ==========================================
-# 4. PIXEL-PERFECT BOUNDING BOX 
+# 4. PIXEL-PERFECT BOUNDING BOX
 # ==========================================
 
 def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg):
@@ -199,7 +258,7 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
     It includes an occlusion check to discard boxes that are mostly empty space.
     """
     final_mask = (instance_map == inst_id) & np.isin(semantic_map, target_tags)
-    
+
     # 1. Count how many actual pixels of this object are visible on screen
     visible_pixel_count = np.count_nonzero(final_mask)
 
@@ -216,16 +275,16 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
 
     # 2. Calculate the total 2D area of the bounding box
     area = (tight_xmax - tight_xmin + 1) * (tight_ymax - tight_ymin + 1)
-    
+
     if area < cfg.capture.min_box_area:
         return None
 
     # 3. THE OCCLUSION CHECK (Fill Ratio)
-    # Divide the actual visible pixels by the total box area. 
-    # If the box is less than 15% full, it means the object is heavily occluded 
+    # Divide the actual visible pixels by the total box area.
+    # If the box is less than 10% full, it means the object is heavily occluded
     # (like behind a fence or trees). We drop it so we don't train on background data.
     fill_ratio = visible_pixel_count / float(area)
-    
+
     if fill_ratio < 0.10:
         return None
 
@@ -332,12 +391,23 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             semantic_map, instance_map = decode_instance_image(inst_image)
             w2c                        = np.array(rgb_camera.get_transform().get_inverse_matrix())
 
-            vehicles = list(world.get_actors().filter("*vehicle*"))
-            walkers  = list(world.get_actors().filter("*walker*"))
-            actors   = vehicles + walkers
+            # FIX Bug 1: capture the camera's world-space location once per frame
+            # so it can be passed to build_instance_to_actor_map as the correct
+            # reference point for depth comparisons.
+            cam_loc = rgb_camera.get_transform().location
 
+            vehicles = list(world.get_actors().filter("*vehicle*"))
+
+            # FIX Bug 4: use the precise walker filter instead of "*walker*" which
+            # also matches invisible controller.ai.walker actors, causing wasted work
+            # on every actor iteration each frame.
+            walkers  = list(world.get_actors().filter("walker.pedestrian.*"))
+
+            actors = vehicles + walkers
+
+            # FIX Bug 1: pass cam_loc so distance calculations are from the camera.
             inst_to_actor = build_instance_to_actor_map(
-                actors, ego_vehicle, K, w2c,
+                actors, ego_vehicle, cam_loc, K, w2c,
                 depth_map, semantic_map, instance_map, cfg
             )
 
@@ -350,7 +420,7 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                     continue
 
                 target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
-                
+
                 # Fetch exact bound from this current frame mask
                 raw_bbox = get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg)
 
@@ -358,8 +428,8 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 # Do NOT use a previous frame's box as it creates floating, lagging artifacts.
                 if raw_bbox is None:
                     continue
-                    
-                bbox = raw_bbox 
+
+                bbox = raw_bbox
 
                 xmin, ymin, xmax, ymax = bbox
 
@@ -396,7 +466,7 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
 
             cv2.imwrite(
                 os.path.join(semantic_dir, file_prefix + ".png"),
-                (semantic_map * 10).astype(np.uint8)  
+                (semantic_map * 10).astype(np.uint8)
             )
 
             with open(os.path.join(cfg.capture.labels_dir, file_prefix + ".txt"), "w") as f:
