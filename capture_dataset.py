@@ -29,19 +29,35 @@ _CROP_PAD = 20
 def get_coco_class(blueprint_id):
     if blueprint_id.startswith("walker."):
         return 0
+        
     if blueprint_id.startswith("vehicle."):
+        # --- Bicycles (COCO 1) ---
         if any(x in blueprint_id for x in ["bicycle", "crossbike", "century", "omafiets"]):
             return 1
-        elif any(x in blueprint_id for x in ["motor", "harley", "kawasaki", "yamaha", "vespa"]):
+            
+        # --- Motorcycles (COCO 3) ---
+        elif any(x in blueprint_id for x in ["motorcycle", "harley", "kawasaki", "yamaha", "vespa"]):
             return 3
-        elif any(x in blueprint_id for x in ["bus", "volkswagen.t2"]):
+            
+        # --- Buses (COCO 5) ---
+        # The Mitsubishi Fusorosa is the only dedicated bus model.
+        elif any(x in blueprint_id for x in ["bus", "fusorosa"]):
             return 5
-        elif any(x in blueprint_id for x in ["truck", "carlacola", "fusorosa", "cybertruck"]):
+            
+        # --- Trucks & Vans (COCO 7) ---
+        # Included standard trucks + all van models (T2, Sprinter, Ambulance)
+        elif any(x in blueprint_id for x in [
+            "truck", "carlacola", "european_hgv", "firetruck", "cybertruck",  # Trucks
+            "van", "ambulance", "sprinter", "volkswagen.t2"                   # Vans
+        ]):
             return 7
+            
+        # --- Cars (COCO 2) ---
+        # All other standard passenger vehicles (Audi, BMW, Dodge, Tesla Model 3, etc.)
         else:
             return 2
+            
     return -1
-
 
 def decode_depth_image(depth_image):
     """Converts the raw depth image into a 2D array of distances in meters."""
@@ -208,9 +224,18 @@ def build_instance_to_actor_map(
         actor_loc = actor.get_transform().location
 
         # FIX Bug 1: measure from the camera, not the ego vehicle origin.
-        dist_to_actor = actor_loc.distance(cam_loc)
+        # FIX: use the bounding-box centre in world space rather than the actor
+        # root/pivot.  For pedestrians the root is at ground level (feet), while
+        # the rendered pixels are centred around the torso.  At close range and
+        # steep camera angles this offset biases dist_to_actor enough to push
+        # torso/head pixels outside the depth-validity window.
+        bb_center_world = actor.get_transform().transform(actor.bounding_box.location)
+        dist_to_actor   = bb_center_world.distance(cam_loc)
 
-        if dist_to_actor > max_render_distance:
+        # Range cull still uses the root location so very-close actors are never
+        # skipped because their bbox centre happens to be slightly farther away.
+        dist_root_to_cam = actor_loc.distance(cam_loc)
+        if dist_root_to_cam > max_render_distance:
             continue
 
         rough_bbox = get_rough_3d_bbox(actor, K, w2c, cfg)
@@ -232,13 +257,29 @@ def build_instance_to_actor_map(
 
         ext = actor.bounding_box.extent
         bb_half_diag = float(np.sqrt(ext.x ** 2 + ext.y ** 2 + ext.z ** 2))
-        tolerance = bb_half_diag + 2.0
+
+        # FIX 2: use depth_tolerance_meters from config instead of hardcoded 2.0.
+        # CaptureConfig.depth_tolerance_meters defaults to 2.5 m.
+        tolerance = bb_half_diag + cfg.capture.depth_tolerance_meters
 
         # FIX Bug 1 (continued): depth map values are measured from the camera,
         # so comparing them against dist_to_actor (also from the camera) is now
         # consistent.
         valid_mask = np.isin(sem_crop, target_tags) & (np.abs(dep_crop - dist_to_actor) <= tolerance)
         candidate_ids = inst_crop[valid_mask]
+
+        # FIX 4: two-pass depth fallback.
+        # If no candidate pixels survive the normal tolerance window (can happen
+        # when the actor is at a steep angle during fast lateral motion and the
+        # bbox-centre depth diverges slightly from the visible-surface depth),
+        # retry with a doubled tolerance before giving up.  This recovers most
+        # close-pass misses without meaningfully polluting the crop with unrelated
+        # actor pixels, because the semantic-tag filter is still active.
+        if candidate_ids.size == 0:
+            fallback_mask = np.isin(sem_crop, target_tags) & (
+                np.abs(dep_crop - dist_to_actor) <= tolerance * 2.0
+            )
+            candidate_ids = inst_crop[fallback_mask]
 
         if candidate_ids.size == 0:
             continue
@@ -287,11 +328,14 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
 
     # 3. THE OCCLUSION CHECK (Fill Ratio)
     # Divide the actual visible pixels by the total box area.
-    # If the box is less than 10% full, it means the object is heavily occluded
-    # (like behind a fence or trees). We drop it so we don't train on background data.
+    # If the fill ratio is below the configured threshold, the object is heavily
+    # occluded (e.g. behind a fence or tree).  We drop it to avoid training on
+    # background-dominated boxes.
+    # FIX 2: use min_visible_ratio from config instead of hardcoded 0.10.
+    # CaptureConfig.min_visible_ratio defaults to 0.25.
     fill_ratio = visible_pixel_count / float(area)
 
-    if fill_ratio < 0.10:
+    if fill_ratio < cfg.capture.min_visible_ratio:
         return None
 
     return tight_xmin, tight_ymin, tight_xmax, tight_ymax
@@ -353,7 +397,7 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
         rgb_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
         rgb_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
         rgb_bp.set_attribute("fov", str(cfg.capture.fov))
-
+--classes 0 1 2 3 5 7
         depth_bp = blueprint_library.find("sensor.camera.depth")
         depth_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
         depth_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
