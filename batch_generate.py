@@ -1,56 +1,47 @@
+"""
+Runs the CARLA data capture pipeline sequentially across multiple maps.
+
+Usage:
+    python batch_generate.py
+"""
 import subprocess
 import time
 
-def main():
-    # 1. Define your list of maps
-    maps_to_run = [
-        "Town01", 
-        "Town02", 
-        "Town03", 
-        "Town04",
-        "Town05", 
-        "Town10HD"
-    ]
-    # Git test
-    # 2. Define your consistent parameters here
-    frames_per_map = 200
-    vehicles = 40
-    walkers = 40
 
-    print("🚀 Starting Automated CARLA Dataset Pipeline...")
-    
-    for current_map in maps_to_run:
+MAPS = ["Town01", "Town02", "Town03", "Town04", "Town05", "Town10HD"]
+FRAMES_PER_MAP = 200
+VEHICLES = 40
+WALKERS = 40
+
+
+def main():
+    print("Starting Automated CARLA Dataset Pipeline...")
+
+    for current_map in MAPS:
         print(f"\n{'='*50}")
-        print(f"   Starting Capture for Map: {current_map}")
+        print(f"   Map: {current_map}")
         print(f"{'='*50}")
-        
-        # 3. Build the command exactly as you would type it in the terminal
+
         command = [
             "python", "run_dataset.py",
             "--map", current_map,
-            "--frames", str(frames_per_map),
-            "--vehicles", str(vehicles),
-            "--walkers", str(walkers),
-            # You can add flags here too, e.g., "--safe", "--car-lights-on"
+            "--frames", str(FRAMES_PER_MAP),
+            "--vehicles", str(VEHICLES),
+            "--walkers", str(WALKERS),
         ]
-        
+
         try:
-            print(f"Executing: {' '.join(command)}")
-            # subprocess.run will wait until run_dataset.py finishes before continuing
+            print(f"Running: {' '.join(command)}")
             subprocess.run(command, check=True)
-            print(f"✅ Successfully finished {current_map}")
-            
+            print(f"Finished {current_map}")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Error occurred while processing {current_map}.")
-            print(f"Details: {e}")
-            print("Skipping to the next map...")
-            
-        # 4. Give the CARLA server a 5-second breather to clear memory 
-        # before we bombard it with the next world-load command.
-        print("Cooling down for 5 seconds...")
+            print(f"Error on {current_map}: {e} — skipping.")
+
+        # Brief cooldown before loading the next map to let CARLA free memory.
         time.sleep(5)
 
-    print("\n🎉 Pipeline complete! All maps processed.")
+    print("\nPipeline complete. All maps processed.")
+
 
 if __name__ == "__main__":
     main()

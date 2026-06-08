@@ -1,7 +1,16 @@
+"""
+Frame-by-frame image capture and YOLO bounding-box label generation for CARLA.
+
+Each simulation tick, three synchronized cameras are read:
+  - RGB          → saved as the training image
+  - Depth        → used to disambiguate overlapping actors by distance
+  - Instance seg → used to find per-pixel actor membership
+
+Detected actors are mapped to COCO class IDs and written as YOLO-format labels.
+"""
 import os
 import queue
 import random
-from collections import Counter
 
 import carla
 import cv2
@@ -10,57 +19,46 @@ import numpy as np
 from carla_config import SimulationConfig
 from carla_utils import build_projection_matrix, ensure_directories, resolve_seeds
 
-# ==========================================
-# CARLA 0.9.15 SEMANTIC TAG CONSTANTS
-# Verify by printing np.unique(semantic_map) for a frame if detections fail.
-# ==========================================
-TAG_VEHICLES    = (14,15,16,18,19)  # CityScapes label for vehicles
-TAG_PEDESTRIANS = (12,13)    # CityScapes label for walkers/pedestrians
+# Semantic tag constants for CARLA 0.9.15 (CityScapes label scheme).
+# Vehicles covers cars, trucks, buses, motorcycles, and bicycles (tags 14–19).
+# Pedestrians covers walkers and riders (tags 12–13).
+TAG_VEHICLES    = (14, 15, 16, 18, 19)
+TAG_PEDESTRIANS = (12, 13)
 
-# Padding (pixels) added to every side of the rough 3D bbox crop window.
-# This ensures partially off-screen actors still get a wide enough search
-# region for reliable instance-ID voting. See Bug 2 fix in get_rough_3d_bbox.
+# Padding added to every side of the rough 3-D bbox crop window so that actors
+# sitting at the image edge still get enough pixels for reliable instance-ID voting.
 _CROP_PAD = 20
 
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
 # 1. UTILITY FUNCTIONS
-# ==========================================
+# ──────────────────────────────────────────────────────────────
 
 def get_coco_class(blueprint_id):
+    """Maps a CARLA blueprint ID to its COCO category index."""
     if blueprint_id.startswith("walker."):
         return 0
-        
+
     if blueprint_id.startswith("vehicle."):
-        # --- Bicycles (COCO 1) ---
         if any(x in blueprint_id for x in ["bicycle", "crossbike", "century", "omafiets"]):
             return 1
-            
-        # --- Motorcycles (COCO 3) ---
         elif any(x in blueprint_id for x in ["motorcycle", "harley", "kawasaki", "yamaha", "vespa"]):
             return 3
-            
-        # --- Buses (COCO 5) ---
-        # The Mitsubishi Fusorosa is the only dedicated bus model.
         elif any(x in blueprint_id for x in ["bus", "fusorosa"]):
             return 5
-            
-        # --- Trucks & Vans (COCO 7) ---
-        # Included standard trucks + all van models (T2, Sprinter, Ambulance)
         elif any(x in blueprint_id for x in [
-            "truck", "carlacola", "european_hgv", "firetruck", "cybertruck",  # Trucks
-            "van", "ambulance", "sprinter", "volkswagen.t2"                   # Vans
+            "truck", "carlacola", "european_hgv", "firetruck", "cybertruck",
+            "van", "ambulance", "sprinter", "volkswagen.t2"
         ]):
             return 7
-            
-        # --- Cars (COCO 2) ---
-        # All other standard passenger vehicles (Audi, BMW, Dodge, Tesla Model 3, etc.)
         else:
             return 2
-            
+
     return -1
 
+
 def decode_depth_image(depth_image):
-    """Converts the raw depth image into a 2D array of distances in meters."""
+    """Converts the raw CARLA depth buffer to a 2-D array of distances in metres."""
     depth = np.frombuffer(depth_image.raw_data, dtype=np.uint8)
     depth = depth.reshape((depth_image.height, depth_image.width, 4))[:, :, :3].astype(np.float32)
 
@@ -74,32 +72,30 @@ def decode_depth_image(depth_image):
 
 def decode_instance_image(instance_image):
     """
-    Decodes the instance segmentation image from CARLA 0.9.15.
+    Decodes the CARLA instance segmentation image into semantic and instance maps.
 
-    CARLA stores data in BGRA byte order (OpenCV convention):
-      arr[:,:,0] = B = low byte of the instance index
-      arr[:,:,1] = G = high byte of the instance index
-      arr[:,:,2] = R = semantic tag (e.g. 10=Vehicle, 4=Pedestrian)
-      arr[:,:,3] = A = unused
+    CARLA stores pixels in BGRA byte order (OpenCV convention):
+      channel 0 (B) = low byte of the internal instance index
+      channel 1 (G) = high byte of the internal instance index
+      channel 2 (R) = semantic tag (e.g. Vehicle, Pedestrian)
+      channel 3 (A) = unused
 
-    IMPORTANT: The instance index encoded here is an internal renderer index.
-    It does NOT equal actor.id from the CARLA Python API. Use
-    build_instance_to_actor_map() to build the pixel-id → actor mapping per frame.
+    The instance index is an internal renderer index and does NOT equal actor.id
+    from the Python API. Use build_instance_to_actor_map() to build the
+    pixel-id → actor mapping per frame.
     """
     arr = np.frombuffer(instance_image.raw_data, dtype=np.uint8)
     arr = arr.reshape((instance_image.height, instance_image.width, 4))
 
-    # R channel = semantic tag
     semantic_map = arr[:, :, 2].astype(np.uint8)
-
-    # G<<8 | B = 16-bit internal instance index
     instance_map = (arr[:, :, 1].astype(np.uint32) << 8) | arr[:, :, 0].astype(np.uint32)
 
     return semantic_map, instance_map
 
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
 # 2. PROJECTION HELPERS
-# ==========================================
+# ──────────────────────────────────────────────────────────────
 
 def _project_world_point(point_xyz, K, w2c):
     p = np.array([point_xyz[0], point_xyz[1], point_xyz[2], 1.0], dtype=np.float32)
@@ -115,7 +111,6 @@ def _project_world_point(point_xyz, K, w2c):
     u = p_img[0] / p_img[2]
     v = p_img[1] / p_img[2]
 
-    # Reject NaN/Inf that can arise from degenerate vertex positions
     if not (np.isfinite(u) and np.isfinite(v)):
         return None
 
@@ -124,20 +119,13 @@ def _project_world_point(point_xyz, K, w2c):
 
 def get_rough_3d_bbox(actor, K, w2c, cfg):
     """
-    Projects the actor's 3D bounding box onto the image plane and returns
-    a 2D pixel rectangle (xmin, ymin, xmax, ymax) as a padded search window.
+    Projects the actor's 3-D bounding box onto the image plane and returns a
+    padded 2-D pixel rectangle (xmin, ymin, xmax, ymax) as a search window.
 
-    FIX Bug 2: A _CROP_PAD pixel margin is added on every side AFTER clamping
-    so that partially off-screen actors (where most bbox vertices project outside
-    the image) still produce a wide-enough crop for reliable instance-ID voting.
-
-    FIX Bug 3: If ALL 8 bbox vertices are behind the camera (pts is empty), the
-    function no longer immediately returns None. Instead it falls back to
-    projecting the actor's bounding-box centre. This handles actors that are very
-    close to the camera and whose body is visible even though the box corners are
-    all behind the near clip plane. Only returns None when the centre is also
-    behind the camera, or when the final search window lies entirely outside the
-    image.
+    If all 8 corner vertices are behind the camera (e.g. an actor very close to
+    the lens), the function falls back to projecting the bounding-box centre so
+    that partially-visible actors near the near-clip plane are not silently dropped.
+    Returns None only when the entire projected region lies outside the image.
     """
     bb = actor.bounding_box
     world_vertices = bb.get_world_vertices(actor.get_transform())
@@ -148,19 +136,14 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
         if p is not None:
             pts.append(p)
 
-    # ------------------------------------------------------------------
-    # FIX Bug 3: all 8 vertices behind the camera — try bbox centre instead
-    # ------------------------------------------------------------------
+    # All corners behind the camera — fall back to projecting the bbox centre.
     if not pts:
         bb_center_world = actor.get_transform().transform(actor.bounding_box.location)
         p = _project_world_point(
             (bb_center_world.x, bb_center_world.y, bb_center_world.z), K, w2c
         )
         if p is None:
-            # Centre is also behind camera; actor is genuinely not visible.
             return None
-        # Use the projected centre as a single representative point.
-        # The _CROP_PAD expansion below will create a meaningful search window.
         pts = [p]
 
     xs = [p[0] for p in pts]
@@ -174,20 +157,14 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
     raw_ymin = int(np.floor(min(ys)))
     raw_ymax = int(np.ceil(max(ys)))
 
-    # Visibility check on the UNCLAMPED rect: if the entire projection falls
-    # outside the image boundary on any single axis, skip the actor.
     if raw_xmax < 0 or raw_xmin >= cfg.capture.img_width:
         return None
     if raw_ymax < 0 or raw_ymin >= cfg.capture.img_height:
         return None
 
-    # ------------------------------------------------------------------
-    # FIX Bug 2: apply _CROP_PAD before clamping to image bounds so that
-    # actors sitting at the edge of the frame get a wide enough search region.
-    # ------------------------------------------------------------------
-    xmin = max(0,                       raw_xmin - _CROP_PAD)
+    xmin = max(0,                          raw_xmin - _CROP_PAD)
     xmax = min(cfg.capture.img_width  - 1, raw_xmax + _CROP_PAD)
-    ymin = max(0,                       raw_ymin - _CROP_PAD)
+    ymin = max(0,                          raw_ymin - _CROP_PAD)
     ymax = min(cfg.capture.img_height - 1, raw_ymax + _CROP_PAD)
 
     if xmax <= xmin or ymax <= ymin:
@@ -195,47 +172,41 @@ def get_rough_3d_bbox(actor, K, w2c, cfg):
 
     return xmin, ymin, xmax, ymax
 
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
 # 3. INSTANCE-ID → ACTOR MAPPING
-# ==========================================
+# ──────────────────────────────────────────────────────────────
 
 def build_instance_to_actor_map(
     actors, ego_vehicle, cam_loc, K, w2c,
     depth_map, semantic_map, instance_map, cfg
 ):
     """
-    Builds a per-frame mapping of {instance_pixel_id: actor} for every visible actor.
+    Builds a per-frame {instance_pixel_id: actor} mapping for every visible actor.
 
-    FIX Bug 1: accepts cam_loc (the world-space camera location) and uses it
-    instead of the ego vehicle's origin to compute dist_to_actor.  The depth
-    map encodes distance from the CAMERA lens, not from the vehicle pivot, so
-    the depth-validity check was biased by up to ~1.9 m for a typical
-    front-mounted camera.  This is most noticeable for actors that are close
-    to the vehicle and near the edges of the frame.
+    For each actor the function:
+      1. Culls by distance from the camera lens.
+      2. Projects the 3-D bounding box to get a pixel search window.
+      3. Filters pixels by semantic tag and depth.
+      4. Votes for the dominant instance ID within the window.
+
+    Distance is measured from the camera lens so depth-map values and actor
+    distances are always on the same scale. For pedestrians and riders, distance
+    is computed to the bounding-box centre rather than the ground-level root pivot
+    to avoid a systematic bias on actors that are close to the camera.
     """
     mapping = {}
-
     max_render_distance = getattr(cfg.capture, 'max_render_distance', 100.0)
 
     for actor in actors:
         if ego_vehicle is not None and actor.id == ego_vehicle.id:
             continue
 
-        actor_loc = actor.get_transform().location
-
-        # FIX Bug 1: measure from the camera, not the ego vehicle origin.
-        # FIX: use the bounding-box centre in world space rather than the actor
-        # root/pivot.  For pedestrians the root is at ground level (feet), while
-        # the rendered pixels are centred around the torso.  At close range and
-        # steep camera angles this offset biases dist_to_actor enough to push
-        # torso/head pixels outside the depth-validity window.
+        actor_loc       = actor.get_transform().location
         bb_center_world = actor.get_transform().transform(actor.bounding_box.location)
         dist_to_actor   = bb_center_world.distance(cam_loc)
 
-        # Range cull still uses the root location so very-close actors are never
-        # skipped because their bbox centre happens to be slightly farther away.
-        dist_root_to_cam = actor_loc.distance(cam_loc)
-        if dist_root_to_cam > max_render_distance:
+        if actor_loc.distance(cam_loc) > max_render_distance:
             continue
 
         rough_bbox = get_rough_3d_bbox(actor, K, w2c, cfg)
@@ -244,8 +215,8 @@ def build_instance_to_actor_map(
 
         xmin, ymin, xmax, ymax = rough_bbox
 
-        # Ensure ID discovery sees both vehicle components (bike frame + rider)
         coco_class = get_coco_class(actor.type_id)
+        # Two-wheeled vehicles share semantic pixels with their rider.
         if coco_class in (1, 3):
             target_tags = TAG_VEHICLES + TAG_PEDESTRIANS
         else:
@@ -253,28 +224,17 @@ def build_instance_to_actor_map(
 
         sem_crop  = semantic_map[ymin:ymax + 1, xmin:xmax + 1]
         inst_crop = instance_map[ymin:ymax + 1, xmin:xmax + 1]
-        dep_crop  = depth_map[ymin:ymax + 1, xmin:xmax + 1]
+        dep_crop  = depth_map[ymin:ymax + 1,   xmin:xmax + 1]
 
         ext = actor.bounding_box.extent
         bb_half_diag = float(np.sqrt(ext.x ** 2 + ext.y ** 2 + ext.z ** 2))
-
-        # FIX 2: use depth_tolerance_meters from config instead of hardcoded 2.0.
-        # CaptureConfig.depth_tolerance_meters defaults to 2.5 m.
         tolerance = bb_half_diag + cfg.capture.depth_tolerance_meters
 
-        # FIX Bug 1 (continued): depth map values are measured from the camera,
-        # so comparing them against dist_to_actor (also from the camera) is now
-        # consistent.
-        valid_mask = np.isin(sem_crop, target_tags) & (np.abs(dep_crop - dist_to_actor) <= tolerance)
+        valid_mask    = np.isin(sem_crop, target_tags) & (np.abs(dep_crop - dist_to_actor) <= tolerance)
         candidate_ids = inst_crop[valid_mask]
 
-        # FIX 4: two-pass depth fallback.
-        # If no candidate pixels survive the normal tolerance window (can happen
-        # when the actor is at a steep angle during fast lateral motion and the
-        # bbox-centre depth diverges slightly from the visible-surface depth),
-        # retry with a doubled tolerance before giving up.  This recovers most
-        # close-pass misses without meaningfully polluting the crop with unrelated
-        # actor pixels, because the semantic-tag filter is still active.
+        # Retry with a wider depth window for fast-moving or steeply-angled actors
+        # where the bbox-centre depth diverges slightly from the visible surface depth.
         if candidate_ids.size == 0:
             fallback_mask = np.isin(sem_crop, target_tags) & (
                 np.abs(dep_crop - dist_to_actor) <= tolerance * 2.0
@@ -284,7 +244,7 @@ def build_instance_to_actor_map(
         if candidate_ids.size == 0:
             continue
 
-        counts = np.bincount(candidate_ids.astype(np.int64))
+        counts     = np.bincount(candidate_ids.astype(np.int64))
         dominant_id = int(np.argmax(counts))
 
         if dominant_id <= 0:
@@ -295,21 +255,23 @@ def build_instance_to_actor_map(
 
     return mapping
 
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
 # 4. PIXEL-PERFECT BOUNDING BOX
-# ==========================================
+# ──────────────────────────────────────────────────────────────
 
 def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg):
     """
-    Given a confirmed instance pixel ID, calculates a tight axis-aligned bounding box.
-    It includes an occlusion check to discard boxes that are mostly empty space.
-    """
-    final_mask = (instance_map == inst_id) & np.isin(semantic_map, target_tags)
+    Returns a tight axis-aligned bounding box for a confirmed instance pixel ID.
 
-    # 1. Count how many actual pixels of this object are visible on screen
+    Applies two quality filters before returning:
+      - Minimum visible pixel count (rejects nearly-fully-occluded actors).
+      - Fill ratio (rejects actors behind fences or foliage where the tight box
+        is mostly background pixels rather than the actor itself).
+    """
+    final_mask          = (instance_map == inst_id) & np.isin(semantic_map, target_tags)
     visible_pixel_count = np.count_nonzero(final_mask)
 
-    # If fewer than 12 pixels are visible, the object is virtually completely occluded.
     if visible_pixel_count < 12:
         return None
 
@@ -320,30 +282,20 @@ def get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg
     tight_ymin = int(np.min(y_coords))
     tight_ymax = int(np.max(y_coords))
 
-    # 2. Calculate the total 2D area of the bounding box
     area = (tight_xmax - tight_xmin + 1) * (tight_ymax - tight_ymin + 1)
-
     if area < cfg.capture.min_box_area:
         return None
 
-    # 3. THE OCCLUSION CHECK (Fill Ratio)
-    # Divide the actual visible pixels by the total box area.
-    # If the fill ratio is below the configured threshold, the object is heavily
-    # occluded (e.g. behind a fence or tree).  We drop it to avoid training on
-    # background-dominated boxes.
-    # FIX 2: use min_visible_ratio from config instead of hardcoded 0.10.
-    # CaptureConfig.min_visible_ratio defaults to 0.25.
     fill_ratio = visible_pixel_count / float(area)
-
     if fill_ratio < cfg.capture.min_visible_ratio:
         return None
 
     return tight_xmin, tight_ymin, tight_xmax, tight_ymax
 
-# ==========================================
-# 5. SPAWNING EGO VEHICLE
-# ==========================================
-# Note: Removed the smooth_bbox function entirely to prevent bounding box lag
+
+# ──────────────────────────────────────────────────────────────
+# 5. EGO VEHICLE SPAWNING
+# ──────────────────────────────────────────────────────────────
 
 def spawn_ego(world, cfg, ego_seed=None):
     seeds = resolve_seeds(cfg)
@@ -358,24 +310,25 @@ def spawn_ego(world, cfg, ego_seed=None):
     ego_bp = blueprint_library.find(cfg.ego_blueprint)
     ego_bp.set_attribute("role_name", cfg.ego_role_name)
 
-    ego_rng = random.Random(ego_seed)
+    ego_rng       = random.Random(ego_seed)
     ego_transform = ego_rng.choice(spawn_points)
-    ego_vehicle = world.try_spawn_actor(ego_bp, ego_transform)
+    ego_vehicle   = world.try_spawn_actor(ego_bp, ego_transform)
     if ego_vehicle is None:
         raise RuntimeError("Could not spawn ego vehicle. Restart CARLA and try again.")
     ego_vehicle.set_autopilot(cfg.ego_autopilot)
     return ego_vehicle
 
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
 # 6. MAIN CAPTURE LOOP
-# ==========================================
+# ──────────────────────────────────────────────────────────────
 
 def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
     ensure_directories(cfg)
 
     instance_dir = os.path.join(cfg.capture.output_dir, "instance_seg")
-    os.makedirs(instance_dir, exist_ok=True)
     semantic_dir = os.path.join(cfg.capture.output_dir, "semantic_debug")
+    os.makedirs(instance_dir, exist_ok=True)
     os.makedirs(semantic_dir, exist_ok=True)
 
     seeds = resolve_seeds(cfg)
@@ -389,29 +342,24 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             ego_vehicle = spawn_ego(world, cfg, ego_seed)
             spawned_actors.append(ego_vehicle)
 
-        cam_transform     = carla.Transform(carla.Location(x=cfg.ego_camera_x, y=cfg.ego_camera_y, z=cfg.ego_camera_z))
+        cam_transform     = carla.Transform(carla.Location(
+            x=cfg.ego_camera_x, y=cfg.ego_camera_y, z=cfg.ego_camera_z
+        ))
         blueprint_library = world.get_blueprint_library()
 
-        # --- Spawn cameras ---
-        rgb_bp = blueprint_library.find("sensor.camera.rgb")
-        rgb_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
-        rgb_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
-        rgb_bp.set_attribute("fov", str(cfg.capture.fov))
---classes 0 1 2 3 5 7
-        depth_bp = blueprint_library.find("sensor.camera.depth")
-        depth_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
-        depth_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
-        depth_bp.set_attribute("fov", str(cfg.capture.fov))
+        def _configure_camera_bp(sensor_type):
+            bp = blueprint_library.find(sensor_type)
+            bp.set_attribute("image_size_x", str(cfg.capture.img_width))
+            bp.set_attribute("image_size_y", str(cfg.capture.img_height))
+            bp.set_attribute("fov",          str(cfg.capture.fov))
+            return bp
 
-        inst_bp = blueprint_library.find("sensor.camera.instance_segmentation")
-        inst_bp.set_attribute("image_size_x", str(cfg.capture.img_width))
-        inst_bp.set_attribute("image_size_y", str(cfg.capture.img_height))
-        inst_bp.set_attribute("fov", str(cfg.capture.fov))
-
-        rgb_camera   = world.spawn_actor(rgb_bp,   cam_transform, attach_to=ego_vehicle)
-        depth_camera = world.spawn_actor(depth_bp,  cam_transform, attach_to=ego_vehicle)
-        inst_camera  = world.spawn_actor(inst_bp,   cam_transform, attach_to=ego_vehicle)
-
+        rgb_camera   = world.spawn_actor(_configure_camera_bp("sensor.camera.rgb"),
+                                         cam_transform, attach_to=ego_vehicle)
+        depth_camera = world.spawn_actor(_configure_camera_bp("sensor.camera.depth"),
+                                         cam_transform, attach_to=ego_vehicle)
+        inst_camera  = world.spawn_actor(_configure_camera_bp("sensor.camera.instance_segmentation"),
+                                         cam_transform, attach_to=ego_vehicle)
         spawned_actors.extend([rgb_camera, depth_camera, inst_camera])
 
         rgb_queue   = queue.Queue()
@@ -440,22 +388,13 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
             depth_map                  = decode_depth_image(depth_image)
             semantic_map, instance_map = decode_instance_image(inst_image)
             w2c                        = np.array(rgb_camera.get_transform().get_inverse_matrix())
-
-            # FIX Bug 1: capture the camera's world-space location once per frame
-            # so it can be passed to build_instance_to_actor_map as the correct
-            # reference point for depth comparisons.
-            cam_loc = rgb_camera.get_transform().location
+            cam_loc                    = rgb_camera.get_transform().location
 
             vehicles = list(world.get_actors().filter("*vehicle*"))
-
-            # FIX Bug 4: use the precise walker filter instead of "*walker*" which
-            # also matches invisible controller.ai.walker actors, causing wasted work
-            # on every actor iteration each frame.
+            # Use the precise pedestrian filter to avoid matching controller.ai.walker actors.
             walkers  = list(world.get_actors().filter("walker.pedestrian.*"))
+            actors   = vehicles + walkers
 
-            actors = vehicles + walkers
-
-            # FIX Bug 1: pass cam_loc so distance calculations are from the camera.
             inst_to_actor = build_instance_to_actor_map(
                 actors, ego_vehicle, cam_loc, K, w2c,
                 depth_map, semantic_map, instance_map, cfg
@@ -469,10 +408,10 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 if coco_class == -1:
                     continue
 
-                is_two_wheeled = coco_class in (1, 3)  # bicycle (1) or motorcycle (3)
+                is_two_wheeled = coco_class in (1, 3)
 
                 if is_two_wheeled:
-                    # --- Vehicle box (the bike frame itself) ---
+                    # Emit separate boxes for the vehicle frame and the rider.
                     vehicle_bbox = get_pixel_perfect_bbox(
                         inst_id, TAG_VEHICLES, semantic_map, instance_map, cfg
                     )
@@ -484,13 +423,11 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                         h  = (ymax - ymin)        / cfg.capture.img_height
                         labels_content += f"{coco_class} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
                         cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                        
                         if cfg.capture.draw_labels:
                             cv2.putText(draw_image, str(coco_class), (xmin, max(0, ymin - 5)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                         detected += 1
 
-                    # --- Rider box (the person on the bike, class 0 = pedestrian) ---
                     rider_bbox = get_pixel_perfect_bbox(
                         inst_id, TAG_PEDESTRIANS, semantic_map, instance_map, cfg
                     )
@@ -502,14 +439,12 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                         h  = (ymax - ymin)        / cfg.capture.img_height
                         labels_content += f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
                         cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                        
                         if cfg.capture.draw_labels:
                             cv2.putText(draw_image, "0", (xmin, max(0, ymin - 5)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                         detected += 1
 
                 else:
-                    # --- Normal single-box path for cars, buses, trucks, pedestrians ---
                     target_tags = TAG_VEHICLES if actor.type_id.startswith("vehicle.") else TAG_PEDESTRIANS
                     bbox = get_pixel_perfect_bbox(inst_id, target_tags, semantic_map, instance_map, cfg)
                     if bbox is None:
@@ -521,33 +456,28 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                     h  = (ymax - ymin)        / cfg.capture.img_height
                     labels_content += f"{coco_class} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n"
                     cv2.rectangle(draw_image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                    
                     if cfg.capture.draw_labels:
                         cv2.putText(draw_image, str(coco_class), (xmin, max(0, ymin - 5)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                     detected += 1
 
-            # --- Save outputs ---
             file_prefix = "{:05d}".format(frame)
 
             cv2.imwrite(os.path.join(cfg.capture.rgb_dir,  file_prefix + ".jpg"), bgr_image)
             cv2.imwrite(os.path.join(cfg.capture.bbox_dir, file_prefix + ".jpg"), draw_image)
-
-            inst_raw_array = (
+            cv2.imwrite(
+                os.path.join(instance_dir, file_prefix + ".png"),
                 np.frombuffer(inst_image.raw_data, dtype=np.uint8)
-                  .reshape((cfg.capture.img_height, cfg.capture.img_width, 4))
+                  .reshape((cfg.capture.img_height, cfg.capture.img_width, 4))[:, :, :3]
             )
-            cv2.imwrite(os.path.join(instance_dir, file_prefix + ".png"), inst_raw_array[:, :, :3])
-
             cv2.imwrite(
                 os.path.join(semantic_dir, file_prefix + ".png"),
                 (semantic_map * 10).astype(np.uint8)
             )
-
             with open(os.path.join(cfg.capture.labels_dir, file_prefix + ".txt"), "w") as f:
                 f.write(labels_content)
 
-            print(f"Processed frame {frame + 1}/{cfg.capture.max_frames} - Detected {detected} objects")
+            print(f"Frame {frame + 1}/{cfg.capture.max_frames} — {detected} objects detected")
 
     finally:
         for actor in reversed(spawned_actors):
@@ -555,11 +485,12 @@ def run_capture(world, cfg, ego_vehicle=None, ego_seed=None):
                 actor.destroy()
             except Exception:
                 pass
-        print("Done. Cleaned up actors.")
+        print("Capture complete. Sensors cleaned up.")
 
-# ==========================================
-# 7. ENTRY POINT
-# ==========================================
+
+# ──────────────────────────────────────────────────────────────
+# 7. STANDALONE ENTRY POINT
+# ──────────────────────────────────────────────────────────────
 
 def main():
     import argparse
@@ -581,9 +512,9 @@ def main():
     cfg.port = args.port
     if args.frames is not None:
         cfg.capture.max_frames = args.frames
-    cfg.capture.img_width  = args.width
-    cfg.capture.img_height = args.height
-    cfg.capture.fov        = args.fov
+    cfg.capture.img_width   = args.width
+    cfg.capture.img_height  = args.height
+    cfg.capture.fov         = args.fov
     cfg.capture.draw_labels = args.draw_labels
     if args.seed is not None:
         cfg.master_seed = args.seed
@@ -597,7 +528,6 @@ def main():
     original_settings = world.get_settings()
     try:
         from carla_utils import apply_world_settings, restore_world_settings, set_weather
-
         set_weather(world, cfg.weather)
         apply_world_settings(world, cfg)
         run_capture(world, cfg, ego_vehicle=None)

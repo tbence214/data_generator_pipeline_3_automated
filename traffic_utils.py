@@ -1,3 +1,10 @@
+"""
+Traffic spawning, management, and cleanup utilities for CARLA simulations.
+
+Includes helpers for spawning NPC vehicles and pedestrians, replacing static
+map props with physics-enabled actors for accurate instance segmentation, and
+restoring world state after capture.
+"""
 import logging
 import time
 from dataclasses import dataclass
@@ -38,6 +45,7 @@ def get_actor_blueprints(world, filter_pattern, generation):
 
 
 def _transform_matches(a, b, loc_tol=0.05, rot_tol=0.5):
+    """Returns True if two transforms are within tolerance (used to reserve the ego spawn point)."""
     return (
         abs(a.location.x - b.location.x) <= loc_tol and
         abs(a.location.y - b.location.y) <= loc_tol and
@@ -47,32 +55,12 @@ def _transform_matches(a, b, loc_tol=0.05, rot_tol=0.5):
         abs(a.rotation.roll - b.rotation.roll) <= rot_tol
     )
 
-# HIDE PARKED VEHICLES
-def hide_static_parked_cars(world):
-    """
-    Finds all baked-in static environment vehicles (like fake parked cars)
-    and hides them from the renderer.
-    Checks multiple label names to support both old and new CARLA versions (e.g., Town10HD).
-    """
-    env_vehicle_ids = set()
-    possible_labels = ["Vehicles", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"]
-    for label_name in possible_labels:
-        if hasattr(carla.CityObjectLabel, label_name):
-            label = getattr(carla.CityObjectLabel, label_name)
-            env_objects = world.get_environment_objects(label)
-            for obj in env_objects:
-                env_vehicle_ids.add(obj.id)
-    if env_vehicle_ids:
-        world.enable_environment_objects(env_vehicle_ids, False)
-        print(f"Successfully hid {len(env_vehicle_ids)} static map vehicles.")
-    else:
-        print("No static map vehicles found to hide.")
-
 
 def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
+    """Spawns NPC vehicles and pedestrians and starts the traffic manager."""
     seeds = resolve_seeds(cfg)
     traffic_seed = seeds["traffic_seed"]
-    walker_seed = seeds["walker_seed"]
+    walker_seed  = seeds["walker_seed"]
 
     traffic_manager = client.get_trafficmanager(cfg.traffic.tm_port)
     traffic_manager.set_global_distance_to_leading_vehicle(2.5)
@@ -91,8 +79,8 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
         world.apply_settings(settings)
 
     vehicles_list = []
-    walkers_list = []
-    all_id = []
+    walkers_list  = []
+    all_id        = []
 
     blueprints = get_actor_blueprints(world, cfg.traffic.filterv, cfg.traffic.generationv)
     if not blueprints:
@@ -110,7 +98,7 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
     if reserved_spawn_points:
         spawn_points = [
             sp for sp in spawn_points
-            if not any(_transform_matches(sp, reserved) for reserved in reserved_spawn_points)
+            if not any(_transform_matches(sp, r) for r in reserved_spawn_points)
         ]
     number_of_spawn_points = len(spawn_points)
 
@@ -119,13 +107,13 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
     if cfg.traffic.number_of_vehicles < number_of_spawn_points:
         rng.shuffle(spawn_points)
     elif cfg.traffic.number_of_vehicles > number_of_spawn_points:
-        msg = 'requested %d vehicles, but could only find %d spawn points'
-        logging.warning(msg, cfg.traffic.number_of_vehicles, number_of_spawn_points)
+        logging.warning('requested %d vehicles, but could only find %d spawn points',
+                        cfg.traffic.number_of_vehicles, number_of_spawn_points)
         cfg.traffic.number_of_vehicles = number_of_spawn_points
 
-    SpawnActor = carla.command.SpawnActor
+    SpawnActor  = carla.command.SpawnActor
     SetAutopilot = carla.command.SetAutopilot
-    FutureActor = carla.command.FutureActor
+    FutureActor  = carla.command.FutureActor
 
     batch = []
     hero = cfg.traffic.hero
@@ -145,7 +133,8 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
         else:
             blueprint.set_attribute('role_name', 'autopilot')
 
-        batch.append(SpawnActor(blueprint, transform).then(SetAutopilot(FutureActor, True, traffic_manager.get_port())))
+        batch.append(SpawnActor(blueprint, transform)
+                     .then(SetAutopilot(FutureActor, True, traffic_manager.get_port())))
 
     for response in client.apply_batch_sync(batch, synchronous_master):
         if response.error:
@@ -154,11 +143,10 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
             vehicles_list.append(response.actor_id)
 
     if cfg.traffic.car_lights_on and vehicles_list:
-        all_vehicle_actors = world.get_actors(vehicles_list)
-        for actor in all_vehicle_actors:
+        for actor in world.get_actors(vehicles_list):
             traffic_manager.update_vehicle_lights(actor, True)
 
-    percentage_pedestrians_running = 0.0
+    percentage_pedestrians_running  = 0.0
     percentage_pedestrians_crossing = 0.0
 
     if walker_seed is not None:
@@ -191,11 +179,11 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
 
     results = client.apply_batch_sync(batch, True)
     walker_speed2 = []
-    for i in range(len(results)):
-        if results[i].error:
-            logging.error(results[i].error)
+    for i, result in enumerate(results):
+        if result.error:
+            logging.error(result.error)
         else:
-            walkers_list.append({"id": results[i].actor_id})
+            walkers_list.append({"id": result.actor_id})
             walker_speed2.append(walker_speed[i])
     walker_speed = walker_speed2
 
@@ -204,11 +192,11 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
     for i in range(len(walkers_list)):
         batch.append(SpawnActor(walker_controller_bp, carla.Transform(), walkers_list[i]["id"]))
     results = client.apply_batch_sync(batch, True)
-    for i in range(len(results)):
-        if results[i].error:
-            logging.error(results[i].error)
+    for i, result in enumerate(results):
+        if result.error:
+            logging.error(result.error)
         else:
-            walkers_list[i]["con"] = results[i].actor_id
+            walkers_list[i]["con"] = result.actor_id
 
     for i in range(len(walkers_list)):
         all_id.append(walkers_list[i]["con"])
@@ -226,7 +214,7 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
         all_actors[i].go_to_location(world.get_random_location_from_navigation())
         all_actors[i].set_max_speed(float(walker_speed[int(i / 2)]))
 
-    print('spawned %d vehicles and %d walkers, press Ctrl+C to exit.' % (len(vehicles_list), len(walkers_list)))
+    print('Spawned %d vehicles and %d walkers.' % (len(vehicles_list), len(walkers_list)))
     traffic_manager.global_percentage_speed_difference(30.0)
 
     return TrafficState(
@@ -239,10 +227,11 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
 
 
 def cleanup_traffic(client, world, state):
+    """Destroys all spawned NPC vehicles and walkers and restores world settings."""
     try:
         if state is None:
             return
-        print('\ndestroying %d vehicles' % len(state.vehicles_list))
+        print('\nDestroying %d vehicles' % len(state.vehicles_list))
         client.apply_batch([carla.command.DestroyActor(x) for x in state.vehicles_list])
 
         all_actors = world.get_actors(state.all_id)
@@ -252,26 +241,31 @@ def cleanup_traffic(client, world, state):
             except Exception:
                 pass
 
-        print('\ndestroying %d walkers' % len(state.walkers_list))
+        print('Destroying %d walkers' % len(state.walkers_list))
         client.apply_batch([carla.command.DestroyActor(x) for x in state.all_id])
         time.sleep(0.5)
     finally:
         restore_world_settings(world, state.original_settings)
-        
-# REPLACE
+
+
 def replace_static_parked_cars_with_actors(client, world):
     """
-    Finds static map vehicles (including bikes), hides them, and spawns real carla.Actor 
-    vehicles in their exact locations so they can be detected by bounding box logic.
+    Replaces static map vehicle props with real physics actors.
+
+    CARLA maps contain baked-in parked vehicles that are invisible to the
+    instance segmentation camera. This function hides those props and spawns
+    equivalent physics actors in the same transforms so they appear in
+    segmentation masks and produce bounding box labels.
+
+    Returns a list of spawned actor IDs for later cleanup.
     """
     import random
-    
-    env_vehicle_ids = set()
-    static_transforms = []
-    
-    # 1. Added "Motorcycle" and "Bicycle" so we hide the fake map bikes too
-    possible_labels = ["Vehicles", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"]
 
+    env_vehicle_ids  = set()
+    static_transforms = []
+
+    # Check multiple label names to cover both old and new CARLA versions (e.g. Town10HD).
+    possible_labels = ["Vehicles", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"]
     for label_name in possible_labels:
         if hasattr(carla.CityObjectLabel, label_name):
             label = getattr(carla.CityObjectLabel, label_name)
@@ -280,42 +274,31 @@ def replace_static_parked_cars_with_actors(client, world):
                 static_transforms.append(obj.transform)
 
     if not static_transforms:
-        print("No static parked vehicles found on this map to replace.")
+        print("No static parked vehicles found on this map.")
         return []
 
-    # 2. Hide the fake static cars and bikes
     world.enable_environment_objects(env_vehicle_ids, False)
 
-    # 3. Get vehicle blueprints, allowing cars, bikes, and motorcycles.
     blueprints = world.get_blueprint_library().filter("vehicle.*")
     allowed_types = ['car', 'motorcycle', 'bicycle']
-    
-    # Filter to only allow the types listed above
-    blueprints = [bp for bp in blueprints if bp.has_attribute('base_type') and bp.get_attribute('base_type') in allowed_types]
+    blueprints = [bp for bp in blueprints
+                  if bp.has_attribute('base_type') and bp.get_attribute('base_type') in allowed_types]
 
     parked_actor_ids = []
-    
-    # 4. Spawn real actors in those spots
     for transform in static_transforms:
         bp = random.choice(blueprints)
         bp.set_attribute('role_name', 'parked')
-        
-        # Give a tiny bump to the Z-axis so they don't clip into the ground
-        transform.location.z += 0.2  
-        
+        transform.location.z += 0.2  # small offset to avoid ground-plane clipping at spawn
         actor = world.try_spawn_actor(bp, transform)
         if actor is not None:
-            # Turn off physics so bikes stand perfectly upright and don't fall over
-            # actor.set_simulate_physics(False) 
             parked_actor_ids.append(actor.id)
 
-    print(f"Replaced {len(static_transforms)} map vehicles with {len(parked_actor_ids)} detectable parked actors.")
-    
+    print(f"Replaced {len(static_transforms)} map props with {len(parked_actor_ids)} physics actors.")
     return parked_actor_ids
 
 
 def cleanup_static_parked_replacements(client, world, parked_actor_ids):
-    """Destroys the spawned parked vehicles at the end of the script."""
+    """Destroys all actors spawned by replace_static_parked_cars_with_actors."""
     if not parked_actor_ids:
         return
     print(f"Cleaning up {len(parked_actor_ids)} parked vehicles...")

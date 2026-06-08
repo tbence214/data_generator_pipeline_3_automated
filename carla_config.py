@@ -9,7 +9,7 @@ class WeatherConfig:
     precipitation_deposits: float = 0.0 # Puddles on the road. 0 = none, 100 = road covered with water.
     wind_intensity: float = 20.0 # Wind strength. It mainly matters for the look of rain and tree motion.
     sun_azimuth_angle: float = 0.0 # Turns the sun around the horizon. It changes the direction of sunlight and shadows.
-    sun_altitude_angle: float = 30.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
+    sun_altitude_angle: float = 20.0 # 90 is midday, 0 is the horizon, and negative values are below the horizon.
     fog_density: float = 0.0
     fog_distance: float = 0.0
     fog_falloff: float = 0.0
@@ -46,7 +46,7 @@ class CaptureConfig:
     fov: float = 90.0
     min_box_area: int = 150
     depth_tolerance_meters: float = 2.5
-    min_visible_ratio: float = 0.25
+    min_visible_ratio: float = 0.15
     visible_sample_grid: int = 15
     draw_labels: bool = False
     output_dir: str = "output"
