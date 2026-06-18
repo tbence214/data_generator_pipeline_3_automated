@@ -25,6 +25,7 @@ class TrafficState:
 
 
 def get_actor_blueprints(world, filter_pattern, generation):
+    """Filters the blueprint library by pattern and CARLA generation (1, 2, 3, or 'All')."""
     bps = world.get_blueprint_library().filter(filter_pattern)
 
     if generation.lower() == "all":
@@ -178,14 +179,14 @@ def spawn_traffic(client, world, cfg, reserved_spawn_points=None):
         batch.append(SpawnActor(walker_bp, spawn_point))
 
     results = client.apply_batch_sync(batch, True)
-    walker_speed2 = []
+    spawned_walker_speed = []
     for i, result in enumerate(results):
         if result.error:
             logging.error(result.error)
         else:
             walkers_list.append({"id": result.actor_id})
-            walker_speed2.append(walker_speed[i])
-    walker_speed = walker_speed2
+            spawned_walker_speed.append(walker_speed[i])
+    walker_speed = spawned_walker_speed
 
     batch = []
     walker_controller_bp = world.get_blueprint_library().find('controller.ai.walker')

@@ -12,7 +12,12 @@ import carla
 from carla_config import SimulationConfig
 from carla_utils import apply_world_settings, restore_world_settings, set_weather, load_world
 from capture_dataset import run_capture, spawn_ego
-from traffic_utils import cleanup_traffic, spawn_traffic
+from traffic_utils import (
+    cleanup_traffic,
+    cleanup_static_parked_replacements,
+    replace_static_parked_cars_with_actors,
+    spawn_traffic,
+)
 
 
 def main():
@@ -39,10 +44,14 @@ def main():
     cfg = SimulationConfig()
     cfg.host = args.host
     cfg.port = args.port
-    if args.seed is not None: cfg.master_seed = args.seed
-    if args.traffic_seed is not None: cfg.traffic_seed = args.traffic_seed
-    if args.ego_seed is not None: cfg.ego_seed = args.ego_seed
-    if args.walker_seed is not None: cfg.walker_seed = args.walker_seed
+    if args.seed is not None:
+        cfg.master_seed = args.seed
+    if args.traffic_seed is not None:
+        cfg.traffic_seed = args.traffic_seed
+    if args.ego_seed is not None:
+        cfg.ego_seed = args.ego_seed
+    if args.walker_seed is not None:
+        cfg.walker_seed = args.walker_seed
     if args.frames is not None:
         cfg.capture.max_frames = args.frames
     cfg.capture.img_width = args.width
@@ -75,7 +84,6 @@ def main():
     try:
         set_weather(world, cfg.weather)
 
-        from traffic_utils import replace_static_parked_cars_with_actors
         static_parked_state = replace_static_parked_cars_with_actors(client, world)
 
         ego_vehicle = spawn_ego(world, cfg, cfg.ego_seed)
@@ -101,7 +109,6 @@ def main():
             restore_world_settings(world, original_settings)
 
         if static_parked_state is not None:
-            from traffic_utils import cleanup_static_parked_replacements
             cleanup_static_parked_replacements(client, world, static_parked_state)
 
         if ego_vehicle is not None:

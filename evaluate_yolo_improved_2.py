@@ -42,7 +42,7 @@ def load_carla_labels(path, img_w, img_h):
                 ymax = int((y + h / 2.0) * img_h)
                 labels.append([int(cls), xmin, ymin, xmax, ymax])
     except Exception as e:
-        print(f"  ⚠️  Error reading {path}: {e}")
+        print(f"  [WARN] Error reading {path}: {e}")
         return np.array([])
 
     return np.array(labels) if labels else np.array([])
@@ -121,16 +121,16 @@ def main():
     RESULTS_CSV = os.path.join(args.dataset, f'evaluation_results_{Path(args.model).stem}.csv')
 
     if not os.path.exists(IMAGES_DIR):
-        print(f"❌ Error: {IMAGES_DIR} not found")
+        print(f"[ERROR] {IMAGES_DIR} not found")
         return
     if not os.path.exists(LABELS_DIR):
-        print(f"⚠️  Warning: {LABELS_DIR} not found, treating all frames as having no labels")
+        print(f"[WARN] {LABELS_DIR} not found, treating all frames as having no labels")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     CLASS_NAMES = {0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck'}
 
-    print(f"🔄 Loading model: {args.model}")
+    print(f"[INFO] Loading model: {args.model}")
     model = YOLO(args.model)
 
     image_files = sorted([f for f in os.listdir(IMAGES_DIR)
@@ -142,11 +142,11 @@ def main():
     per_class_stats = defaultdict(lambda: {'tp': 0, 'fp': 0, 'gt': 0})
     csv_rows = []
 
-    print(f"🚀 Evaluating {len(image_files)} images...")
+    print(f"[INFO] Evaluating {len(image_files)} images...")
     if args.classes is not None:
-        print(f"🔍 Filtering to classes: {args.classes}")
-    print(f"📂 Saving visualisations to: {OUTPUT_DIR}")
-    print(f"💾 Saving CSV to: {RESULTS_CSV}\n")
+        print(f"[INFO] Filtering to classes: {args.classes}")
+    print(f"[INFO] Saving visualisations to: {OUTPUT_DIR}")
+    print(f"[INFO] Saving CSV to: {RESULTS_CSV}\n")
 
     for img_idx, img_name in enumerate(image_files):
         img_path   = os.path.join(IMAGES_DIR, img_name)
@@ -154,7 +154,7 @@ def main():
 
         img = cv2.imread(img_path)
         if img is None:
-            print(f"  ⚠️  Could not read {img_path}, skipping")
+            print(f"  [WARN] Could not read {img_path}, skipping")
             continue
 
         img_h, img_w, _ = img.shape
@@ -237,7 +237,7 @@ def main():
     f1_score  = 2 * (precision * recall) / (precision + recall + 1e-6)
 
     print("\n" + "=" * 70)
-    print("🎯 EVALUATION RESULTS")
+    print("EVALUATION RESULTS")
     print("=" * 70)
     print(f"Model:                    {args.model}")
     print(f"Dataset:                  {args.dataset}")
@@ -256,7 +256,7 @@ def main():
     print(f"F1-Score:                 {f1_score:6.4f}")
     print("=" * 70)
 
-    print("\n📊 PER-CLASS METRICS:")
+    print("\nPER-CLASS METRICS:")
     print("-" * 70)
     print(f"{'Class':<15} {'TP':>6} {'FP':>6} {'GT':>6} {'Precision':>12} {'Recall':>12}")
     print("-" * 70)
@@ -273,8 +273,8 @@ def main():
         writer.writerow(['Image', 'TP', 'FP', 'GT', 'FN', 'Precision', 'Recall'])
         writer.writerows(csv_rows)
 
-    print(f"\n✅ Results saved to: {RESULTS_CSV}")
-    print(f"✅ Visualisations saved to: {OUTPUT_DIR}")
+    print(f"\n[DONE] Results saved to: {RESULTS_CSV}")
+    print(f"[DONE] Visualisations saved to: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
